@@ -4,13 +4,14 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
-#include <cmath>
-#include <fstream>
 #include <cstdint>
 #include <cstdlib>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
 #else
 #include <sys/resource.h>
 #endif
@@ -46,6 +47,18 @@ static bool get_process_memory_snapshot(process_memory_snapshot & out) {
         out.phys_footprint_bytes = out.rss_bytes;
     }
     return true;
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS stats = {};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &stats,
+                            sizeof(PROCESS_MEMORY_COUNTERS)) != 0) {
+      out.rss_bytes = (uint64_t)stats.WorkingSetSize;
+      out.phys_footprint_bytes = (uint64_t)stats.PeakWorkingSetSize;
+      return true;
+    } else {
+      out.rss_bytes = 0ULL;
+      out.phys_footprint_bytes = 0ULL;
+      return false;
+    }
 #else
     struct rusage usage = {};
     if (getrusage(RUSAGE_SELF, &usage) != 0) {
@@ -86,13 +99,13 @@ static void resample_linear(const float * input, int input_len, int input_rate,
     double ratio = (double)input_rate / output_rate;
     int output_len = (int)((double)input_len / ratio);
     output.resize(output_len);
-    
+
     for (int i = 0; i < output_len; ++i) {
         double src_idx = i * ratio;
         int idx0 = (int)src_idx;
         int idx1 = idx0 + 1;
         double frac = src_idx - idx0;
-        
+
         if (idx1 >= input_len) {
             output[i] = input[input_len - 1];
         } else {
@@ -113,7 +126,7 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     audio_decoder_.unload_model();
     transformer_loaded_ = false;
     decoder_loaded_ = false;
-    
+
     // Construct model paths
     std::string tts_model_path = model_dir + "/qwen3-tts-0.6b-f16.gguf";
     std::string tokenizer_model_path = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
@@ -128,10 +141,10 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     if (low_mem_mode_) {
         fprintf(stderr, "  Low-memory mode enabled (lazy decoder + component unloads)\n");
     }
-    
+
     // Load TTS model (contains text tokenizer + transformer for generation)
     fprintf(stderr, "Loading TTS model from %s...\n", tts_model_path.c_str());
-    
+
     // Load text tokenizer from TTS model
     int64_t t_tokenizer_start = get_time_ms();
     {
@@ -140,7 +153,7 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
             error_msg_ = "Failed to open TTS model: " + loader.get_error();
             return false;
         }
-        
+
         if (!tokenizer_.load_from_gguf(loader.get_ctx())) {
             error_msg_ = "Failed to load text tokenizer: " + tokenizer_.get_error();
             return false;
@@ -150,10 +163,10 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
                 (long long)(get_time_ms() - t_tokenizer_start));
     }
     log_memory_usage("load/after-tokenizer");
-    
+
     // Speaker encoder is loaded lazily on first voice cloning request.
     fprintf(stderr, "  Speaker encoder: deferred (lazy load)\n");
-    
+
     // Load TTS transformer from TTS model
     int64_t t_transformer_start = get_time_ms();
     if (!transformer_.load_model(tts_model_path)) {
@@ -165,7 +178,7 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
             transformer_.get_config().hidden_size, transformer_.get_config().n_layers,
             (long long)(get_time_ms() - t_transformer_start));
     log_memory_usage("load/after-transformer");
-    
+
     if (!low_mem_mode_) {
         // Load vocoder (audio decoder) from tokenizer model
         fprintf(stderr, "Loading vocoder from %s...\n", tokenizer_model_path.c_str());
@@ -182,29 +195,29 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     } else {
         fprintf(stderr, "  Vocoder: deferred (lazy load)\n");
     }
-    
+
     models_loaded_ = true;
-    
+
     int64_t t_end = get_time_ms();
     fprintf(stderr, "All models loaded in %lld ms\n", (long long)(t_end - t_start));
     log_memory_usage("load/end");
-    
+
     return true;
 }
 
 tts_result Qwen3TTS::synthesize(const std::string & text,
                                  const tts_params & params) {
     tts_result result;
-    
+
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
         return result;
     }
-    
+
     // For basic synthesis without voice cloning, we use a zero speaker embedding
     // This will use the model's default voice characteristics
     std::vector<float> zero_embedding(transformer_.get_config().hidden_size, 0.0f);
-    
+
     return synthesize_internal(text, zero_embedding.data(), params, result);
 }
 
@@ -212,14 +225,14 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const std::string & reference_audio,
                                             const tts_params & params) {
     tts_result result;
-    
+
     std::vector<float> ref_samples;
     int ref_sample_rate;
     if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
         result.error_msg = "Failed to load reference audio: " + reference_audio;
         return result;
     }
-    
+
     const int target_rate = 24000;
     if (ref_sample_rate != target_rate) {
         fprintf(stderr, "Resampling audio from %d Hz to %d Hz...\n", ref_sample_rate, target_rate);
@@ -227,7 +240,7 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         resample_linear(ref_samples.data(), (int)ref_samples.size(), ref_sample_rate, resampled, target_rate);
         ref_samples = std::move(resampled);
     }
-    
+
     return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), params);
 }
 
@@ -235,7 +248,7 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const float * ref_samples, int32_t n_ref_samples,
                                             const tts_params & params) {
     tts_result result;
-    
+
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
         return result;
@@ -258,20 +271,20 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
             log_memory_usage("voice/after-encoder-load");
         }
     }
-    
+
     int64_t t_encode_start = get_time_ms();
     std::vector<float> speaker_embedding;
-    
+
     if (!audio_encoder_.encode(ref_samples, n_ref_samples, speaker_embedding)) {
         result.error_msg = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
         return result;
     }
     result.t_encode_ms = get_time_ms() - t_encode_start;
-    
+
     if (params.print_progress) {
         fprintf(stderr, "Speaker embedding extracted: %zu floats\n", speaker_embedding.size());
     }
-    
+
     return synthesize_internal(text, speaker_embedding.data(), params, result);
 }
 
@@ -305,28 +318,28 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         }
     };
     sample_memory("synth/start");
-    
+
     // Step 2: Tokenize input text
     int64_t t_tokenize_start = get_time_ms();
     std::vector<int32_t> text_tokens = tokenizer_.encode_for_tts(text);
     result.t_tokenize_ms = get_time_ms() - t_tokenize_start;
     sample_memory("synth/after-tokenize");
-    
+
     if (text_tokens.empty()) {
         result.error_msg = "Failed to tokenize text";
         return result;
     }
-    
+
     if (params.print_progress) {
         fprintf(stderr, "Text tokenized: %zu tokens\n", text_tokens.size());
         fprintf(stderr, "  Tokens: ");
-        for (size_t i = 0; i < std::min(text_tokens.size(), (size_t)10); ++i) {
+        for (size_t i = 0; i < min(text_tokens.size(), (size_t)10); ++i) {
             fprintf(stderr, "%d ", text_tokens[i]);
         }
         if (text_tokens.size() > 10) fprintf(stderr, "...");
         fprintf(stderr, "\n");
     }
-    
+
     // Step 3: Generate speech codes using TTS transformer
     int64_t t_generate_start = get_time_ms();
     if (!transformer_loaded_) {
@@ -343,7 +356,7 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         }
     }
     transformer_.clear_kv_cache();
-    
+
     std::vector<int32_t> speech_codes;
     if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
                                speaker_embedding, params.max_audio_tokens, speech_codes,
@@ -354,14 +367,14 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     }
     result.t_generate_ms = get_time_ms() - t_generate_start;
     sample_memory("synth/after-generate");
-    
+
     int n_codebooks = transformer_.get_config().n_codebooks;
     int n_frames = (int)speech_codes.size() / n_codebooks;
-    
+
     if (params.print_progress) {
         fprintf(stderr, "Speech codes generated: %d frames x %d codebooks\n", n_frames, n_codebooks);
     }
-    
+
     if (n_frames == 0) {
         result.error_msg = "No speech codes generated";
         return result;
@@ -372,7 +385,7 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         transformer_loaded_ = false;
         sample_memory("synth/after-transformer-unload");
     }
-    
+
     // Step 4: Decode speech codes to waveform using vocoder
     int64_t t_decode_start = get_time_ms();
     if (!decoder_loaded_) {
@@ -392,7 +405,7 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
             sample_memory("synth/after-vocoder-load");
         }
     }
-    
+
     if (!audio_decoder_.decode(speech_codes.data(), n_frames, result.audio)) {
         result.error_msg = "Failed to decode speech codes: " + audio_decoder_.get_error();
         return result;
@@ -405,12 +418,12 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         decoder_loaded_ = false;
         sample_memory("synth/after-vocoder-unload");
     }
-    
+
     result.sample_rate = audio_decoder_.get_config().sample_rate;
     result.success = true;
     result.t_total_ms = get_time_ms() - t_total_start;
     sample_memory("synth/end");
-    
+
     if (params.print_timing) {
         const double audio_sec = result.sample_rate > 0
             ? (double) result.audio.size() / (double) result.sample_rate : 0.0;
@@ -437,7 +450,7 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         fprintf(stderr, "  Phys peak:       %s\n",
                 format_bytes(result.mem_phys_peak_bytes).c_str());
     }
-    
+
     return result;
 }
 
@@ -446,14 +459,14 @@ void Qwen3TTS::set_progress_callback(tts_progress_callback_t callback) {
 }
 
 // WAV file loading (16-bit PCM or 32-bit float)
-bool load_audio_file(const std::string & path, std::vector<float> & samples, 
+bool load_audio_file(const std::string & path, std::vector<float> & samples,
                      int & sample_rate) {
     FILE * f = fopen(path.c_str(), "rb");
     if (!f) {
         fprintf(stderr, "ERROR: Cannot open WAV file: %s\n", path.c_str());
         return false;
     }
-    
+
     // Read RIFF header
     char riff[4];
     if (fread(riff, 1, 4, f) != 4 || strncmp(riff, "RIFF", 4) != 0) {
@@ -461,40 +474,40 @@ bool load_audio_file(const std::string & path, std::vector<float> & samples,
         fclose(f);
         return false;
     }
-    
+
     uint32_t file_size;
     if (fread(&file_size, 4, 1, f) != 1) {
         fclose(f);
         return false;
     }
-    
+
     char wave[4];
     if (fread(wave, 1, 4, f) != 4 || strncmp(wave, "WAVE", 4) != 0) {
         fprintf(stderr, "ERROR: Not a WAVE file\n");
         fclose(f);
         return false;
     }
-    
+
     // Find fmt and data chunks
     uint16_t audio_format = 0;
     uint16_t num_channels = 0;
     uint32_t sr = 0;
     uint16_t bits_per_sample = 0;
-    
+
     while (!feof(f)) {
         char chunk_id[4];
         uint32_t chunk_size;
-        
+
         if (fread(chunk_id, 1, 4, f) != 4) break;
         if (fread(&chunk_size, 4, 1, f) != 1) break;
-        
+
         if (strncmp(chunk_id, "fmt ", 4) == 0) {
             if (fread(&audio_format, 2, 1, f) != 1) break;
             if (fread(&num_channels, 2, 1, f) != 1) break;
             if (fread(&sr, 4, 1, f) != 1) break;
             fseek(f, 6, SEEK_CUR);  // Skip byte rate and block align
             if (fread(&bits_per_sample, 2, 1, f) != 1) break;
-            
+
             // Skip any extra format bytes
             if (chunk_size > 16) {
                 fseek(f, chunk_size - 16, SEEK_CUR);
@@ -502,18 +515,18 @@ bool load_audio_file(const std::string & path, std::vector<float> & samples,
         }
         else if (strncmp(chunk_id, "data", 4) == 0) {
             sample_rate = sr;
-            
+
             if (audio_format == 1) {  // PCM
                 if (bits_per_sample == 16) {
                     int n_samples = chunk_size / (2 * num_channels);
                     samples.resize(n_samples);
-                    
+
                     std::vector<int16_t> raw(n_samples * num_channels);
                     if (fread(raw.data(), 2, n_samples * num_channels, f) != (size_t)(n_samples * num_channels)) {
                         fclose(f);
                         return false;
                     }
-                    
+
                     // Convert to mono float
                     for (int i = 0; i < n_samples; ++i) {
                         float sum = 0.0f;
@@ -526,13 +539,13 @@ bool load_audio_file(const std::string & path, std::vector<float> & samples,
                 else if (bits_per_sample == 32) {
                     int n_samples = chunk_size / (4 * num_channels);
                     samples.resize(n_samples);
-                    
+
                     std::vector<int32_t> raw(n_samples * num_channels);
                     if (fread(raw.data(), 4, n_samples * num_channels, f) != (size_t)(n_samples * num_channels)) {
                         fclose(f);
                         return false;
                     }
-                    
+
                     // Convert to mono float
                     for (int i = 0; i < n_samples; ++i) {
                         float sum = 0.0f;
@@ -551,13 +564,13 @@ bool load_audio_file(const std::string & path, std::vector<float> & samples,
             else if (audio_format == 3) {  // IEEE float
                 int n_samples = chunk_size / (4 * num_channels);
                 samples.resize(n_samples);
-                
+
                 std::vector<float> raw(n_samples * num_channels);
                 if (fread(raw.data(), 4, n_samples * num_channels, f) != (size_t)(n_samples * num_channels)) {
                     fclose(f);
                     return false;
                 }
-                
+
                 // Convert to mono
                 for (int i = 0; i < n_samples; ++i) {
                     float sum = 0.0f;
@@ -572,7 +585,7 @@ bool load_audio_file(const std::string & path, std::vector<float> & samples,
                 fclose(f);
                 return false;
             }
-            
+
             fclose(f);
             return true;
         }
@@ -581,7 +594,7 @@ bool load_audio_file(const std::string & path, std::vector<float> & samples,
             fseek(f, chunk_size, SEEK_CUR);
         }
     }
-    
+
     fprintf(stderr, "ERROR: No data chunk found\n");
     fclose(f);
     return false;
@@ -595,7 +608,7 @@ bool save_audio_file(const std::string & path, const std::vector<float> & sample
         fprintf(stderr, "ERROR: Cannot create WAV file: %s\n", path.c_str());
         return false;
     }
-    
+
     // WAV header parameters
     uint16_t num_channels = 1;
     uint16_t bits_per_sample = 16;
@@ -603,12 +616,12 @@ bool save_audio_file(const std::string & path, const std::vector<float> & sample
     uint16_t block_align = num_channels * bits_per_sample / 8;
     uint32_t data_size = samples.size() * block_align;
     uint32_t file_size = 36 + data_size;
-    
+
     // Write RIFF header
     fwrite("RIFF", 1, 4, f);
     fwrite(&file_size, 4, 1, f);
     fwrite("WAVE", 1, 4, f);
-    
+
     // Write fmt chunk
     fwrite("fmt ", 1, 4, f);
     uint32_t fmt_size = 16;
@@ -621,11 +634,11 @@ bool save_audio_file(const std::string & path, const std::vector<float> & sample
     fwrite(&byte_rate, 4, 1, f);
     fwrite(&block_align, 2, 1, f);
     fwrite(&bits_per_sample, 2, 1, f);
-    
+
     // Write data chunk
     fwrite("data", 1, 4, f);
     fwrite(&data_size, 4, 1, f);
-    
+
     // Convert float samples to 16-bit PCM and write
     for (size_t i = 0; i < samples.size(); ++i) {
         // Clamp to [-1, 1] and convert to int16
@@ -635,7 +648,7 @@ bool save_audio_file(const std::string & path, const std::vector<float> & sample
         int16_t pcm_sample = (int16_t)(sample * 32767.0f);
         fwrite(&pcm_sample, 2, 1, f);
     }
-    
+
     fclose(f);
     return true;
 }
