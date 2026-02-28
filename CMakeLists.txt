@@ -163,6 +163,22 @@ target_link_libraries(qwen3_tts PUBLIC
     Threads::Threads
 )
 
+# Shared library with C API (for FFI integration with Python, Nim, Rust, etc.)
+add_library(qwen3tts_shared SHARED
+    src/qwen3tts_c_api.cpp
+)
+set_target_properties(qwen3tts_shared PROPERTIES
+    OUTPUT_NAME "qwen3tts"
+    VERSION ${PROJECT_VERSION}
+    SOVERSION 0
+)
+target_include_directories(qwen3tts_shared PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(qwen3tts_shared PRIVATE
+    qwen3_tts
+)
+
 # CLI executable
 add_executable(qwen3-tts-cli
     src/main.cpp
@@ -208,18 +224,20 @@ target_link_libraries(test_decoder PRIVATE
 )
 
 # Install targets
-install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_tokenizer_decoder qwen3_tts qwen3-tts-cli
+install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
-install(FILES 
-    src/gguf_loader.h 
-    src/text_tokenizer.h 
-    src/tts_transformer.h 
+install(FILES
+    src/gguf_loader.h
+    src/text_tokenizer.h
+    src/tts_transformer.h
     src/coreml_code_predictor.h
-    src/audio_tokenizer_encoder.h 
-    src/audio_tokenizer_decoder.h 
+    src/audio_tokenizer_encoder.h
+    src/audio_tokenizer_decoder.h
     src/qwen3_tts.h
+    src/qwen3tts_c_api.h
     DESTINATION include
 )
 
