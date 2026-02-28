@@ -31,6 +31,14 @@ find_package(Threads REQUIRED)
 set(GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml")
 set(GGML_BUILD_DIR "${GGML_DIR}/build")
 
+# Detect Metal backend availability (requires building GGML with -DGGML_METAL=ON)
+if(APPLE AND EXISTS "${GGML_BUILD_DIR}/src/ggml-metal/libggml-metal.dylib")
+    set(GGML_HAS_METAL ON)
+    message(STATUS "GGML Metal backend found — GPU acceleration enabled")
+else()
+    set(GGML_HAS_METAL OFF)
+endif()
+
 # Text tokenizer library
 add_library(text_tokenizer STATIC
     src/text_tokenizer.cpp
@@ -42,6 +50,7 @@ target_include_directories(text_tokenizer PUBLIC
 )
 target_link_directories(text_tokenizer PUBLIC
     ${GGML_BUILD_DIR}/src
+    ${GGML_BUILD_DIR}/src/ggml-metal
 )
 target_link_libraries(text_tokenizer PUBLIC
     ggml
@@ -49,6 +58,9 @@ target_link_libraries(text_tokenizer PUBLIC
     ggml-cpu
     Threads::Threads
 )
+if(GGML_HAS_METAL)
+    target_link_libraries(text_tokenizer PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
 
 # TTS Transformer library (GGML-based + optional CoreML bridge)
 set(TTS_TRANSFORMER_SOURCES
@@ -71,6 +83,7 @@ target_include_directories(tts_transformer PUBLIC
 )
 target_link_directories(tts_transformer PUBLIC
     ${GGML_BUILD_DIR}/src
+    ${GGML_BUILD_DIR}/src/ggml-metal
 )
 target_link_libraries(tts_transformer PUBLIC
     ggml
@@ -78,6 +91,9 @@ target_link_libraries(tts_transformer PUBLIC
     ggml-cpu
     Threads::Threads
 )
+if(GGML_HAS_METAL)
+    target_link_libraries(tts_transformer PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
 if(APPLE AND QWEN3_TTS_COREML)
     target_link_libraries(tts_transformer PUBLIC
         "-framework Foundation"
@@ -96,6 +112,7 @@ target_include_directories(audio_tokenizer_encoder PUBLIC
 )
 target_link_directories(audio_tokenizer_encoder PUBLIC
     ${GGML_BUILD_DIR}/src
+    ${GGML_BUILD_DIR}/src/ggml-metal
 )
 target_link_libraries(audio_tokenizer_encoder PUBLIC
     ggml
@@ -103,6 +120,9 @@ target_link_libraries(audio_tokenizer_encoder PUBLIC
     ggml-cpu
     Threads::Threads
 )
+if(GGML_HAS_METAL)
+    target_link_libraries(audio_tokenizer_encoder PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
 
 # Audio tokenizer decoder library (GGML-based)
 add_library(audio_tokenizer_decoder STATIC
@@ -115,6 +135,7 @@ target_include_directories(audio_tokenizer_decoder PUBLIC
 )
 target_link_directories(audio_tokenizer_decoder PUBLIC
     ${GGML_BUILD_DIR}/src
+    ${GGML_BUILD_DIR}/src/ggml-metal
 )
 target_link_libraries(audio_tokenizer_decoder PUBLIC
     ggml
@@ -122,6 +143,9 @@ target_link_libraries(audio_tokenizer_decoder PUBLIC
     ggml-cpu
     Threads::Threads
 )
+if(GGML_HAS_METAL)
+    target_link_libraries(audio_tokenizer_decoder PUBLIC ggml-metal "-framework Metal" "-framework MetalKit")
+endif()
 
 # Qwen3 TTS library (full pipeline)
 add_library(qwen3_tts STATIC
