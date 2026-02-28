@@ -114,8 +114,17 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     transformer_loaded_ = false;
     decoder_loaded_ = false;
     
-    // Construct model paths
-    std::string tts_model_path = model_dir + "/qwen3-tts-0.6b-f16.gguf";
+    // Construct model paths — prefer quantized (q8_0) over full-precision (f16)
+    std::string tts_model_path;
+    std::string q8_path = model_dir + "/qwen3-tts-0.6b-q8_0.gguf";
+    std::string f16_path = model_dir + "/qwen3-tts-0.6b-f16.gguf";
+    FILE * q8_check = fopen(q8_path.c_str(), "r");
+    if (q8_check) {
+        fclose(q8_check);
+        tts_model_path = q8_path;
+    } else {
+        tts_model_path = f16_path;
+    }
     std::string tokenizer_model_path = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
     tts_model_path_ = tts_model_path;
     decoder_model_path_ = tokenizer_model_path;
