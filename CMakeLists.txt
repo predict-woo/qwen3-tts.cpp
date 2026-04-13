@@ -24,6 +24,10 @@ if(APPLE AND QWEN3_TTS_COREML)
     enable_language(OBJCXX)
 endif()
 
+if (WIN32)
+    add_definitions(-D_USE_MATH_DEFINES -DNOMINMAX)
+endif()
+
 # Find threads
 find_package(Threads REQUIRED)
 
@@ -188,13 +192,13 @@ install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_tok
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
 )
-install(FILES 
-    src/gguf_loader.h 
-    src/text_tokenizer.h 
-    src/tts_transformer.h 
+install(FILES
+    src/gguf_loader.h
+    src/text_tokenizer.h
+    src/tts_transformer.h
     src/coreml_code_predictor.h
-    src/audio_tokenizer_encoder.h 
-    src/audio_tokenizer_decoder.h 
+    src/audio_tokenizer_encoder.h
+    src/audio_tokenizer_decoder.h
     src/qwen3_tts.h
     DESTINATION include
 )

@@ -333,7 +333,7 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     if (params.print_progress) {
         fprintf(stderr, "Text tokenized: %zu tokens\n", text_tokens.size());
         fprintf(stderr, "  Tokens: ");
-        for (size_t i = 0; i < min(text_tokens.size(), (size_t)10); ++i) {
+        for (size_t i = 0; i < std::min(text_tokens.size(), (size_t)10); ++i) {
             fprintf(stderr, "%d ", text_tokens[i]);
         }
         if (text_tokens.size() > 10) fprintf(stderr, "...");

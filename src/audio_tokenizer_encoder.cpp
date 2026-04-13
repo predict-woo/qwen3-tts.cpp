@@ -6,10 +6,6 @@
 #include <cstring>
 #include <algorithm>
 
-#ifdef _WIN32
-#define M_PI 3.14159265358
-#endif
-
 #define QWEN3_TTS_MAX_NODES 16384
 
 namespace qwen3_tts {
