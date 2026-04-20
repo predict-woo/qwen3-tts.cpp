@@ -305,6 +305,8 @@ Place both `.gguf` files in a `models/` directory.
 | `-r, --reference <file>` | Reference audio for voice cloning | (none) |
 | `--speaker-embedding <file>` | Use precomputed speaker embedding (.json/.bin) | (none) |
 | `--dump-speaker-embedding <file>` | Save extracted embedding from `--reference` | (none) |
+| `--speaker <name>` | Use a named preset voice (CustomVoice / VoiceDesign models) | (none) |
+| `--list-speakers` | Print the preset voices baked into the loaded model and exit | — |
 | `-i, --instruction, --instruct <text>` | Voice steering instruction (e.g. "Speak happily") | (none) |
 | `--temperature <val>` | Sampling temperature (0 = greedy) | 0.9 |
 | `--top-k <n>` | Top-k sampling (0 = disabled) | 50 |
@@ -315,6 +317,30 @@ Place both `.gguf` files in a `models/` directory.
 | `--no-f32-acc` | Disable f32 matmul accumulation (faster, less precise) | (off) |
 | `-l, --language <lang>` | Language: en, ru, zh, ja, ko, de, fr, es | en |
 | `-j, --threads <n>` | Number of compute threads | 4 |
+
+### Preset Voices (CustomVoice / VoiceDesign)
+
+The `Qwen3-TTS-12Hz-1.7B-CustomVoice` and `-VoiceDesign` repos ship a set of built-in preset voices (e.g. `serena`, `ryan`, `dylan`) that are reserved codec token IDs. No reference audio is required — just pick a preset by name.
+
+```bash
+# Convert the CustomVoice checkpoint (once)
+huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+    --local-dir models/hf/qwen3-tts-1.7b-customvoice
+python scripts/convert_tts_to_gguf.py \
+    --input models/hf/qwen3-tts-1.7b-customvoice \
+    --output models/qwen3-tts-1.7b-customvoice-f16.gguf --type f16
+
+# List preset voices baked into the model
+./build/qwen3-tts-cli -m models \
+  --tts-model qwen3-tts-1.7b-customvoice-f16.gguf --list-speakers
+
+# Synthesize with a named preset
+./build/qwen3-tts-cli -m models \
+  --tts-model qwen3-tts-1.7b-customvoice-f16.gguf \
+  --speaker serena -t "Hello from the preset voice!" -o out.wav
+```
+
+Base variants (`-Base` on HF) carry no preset list — use voice cloning via `-r reference.wav` instead. The Python server's `/v1/audio/voices` endpoint lists both local JSON embeddings (from `voices/`) and model-level presets; `/v1/audio/speech` accepts either kind in the `voice` field.
 
 ### Speaker Embedding Workflow
 

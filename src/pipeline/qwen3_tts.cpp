@@ -541,6 +541,55 @@ void Qwen3TTS::set_progress_callback(tts_progress_callback_t callback) {
     progress_callback_ = callback;
 }
 
+// --- Model metadata & speaker-preset accessors ------------------------------
+
+const std::string & Qwen3TTS::get_model_type() const {
+    return transformer_.get_config().model_type;
+}
+
+const std::string & Qwen3TTS::get_model_size() const {
+    return transformer_.get_config().model_size;
+}
+
+bool Qwen3TTS::has_speaker_encoder() const {
+    return transformer_.get_config().has_speaker_encoder;
+}
+
+const std::vector<std::string> & Qwen3TTS::get_speaker_names() const {
+    return transformer_.get_config().speaker_names;
+}
+
+const std::vector<int32_t> & Qwen3TTS::get_speaker_ids() const {
+    return transformer_.get_config().speaker_ids;
+}
+
+const std::vector<std::string> & Qwen3TTS::get_speaker_dialects() const {
+    return transformer_.get_config().speaker_dialects;
+}
+
+int32_t Qwen3TTS::get_speaker_id(const std::string & name) const {
+    const auto & cfg = transformer_.get_config();
+    for (size_t i = 0; i < cfg.speaker_names.size(); ++i) {
+        if (cfg.speaker_names[i] == name) {
+            return cfg.speaker_ids[i];
+        }
+    }
+    return -1;
+}
+
+bool Qwen3TTS::get_speaker_embedding(const std::string & name, std::vector<float> & out) {
+    int32_t tid = get_speaker_id(name);
+    if (tid < 0) {
+        error_msg_ = "Unknown speaker preset: " + name;
+        return false;
+    }
+    if (!transformer_.get_codec_embedding_row(tid, out)) {
+        error_msg_ = "Failed to read codec_embd row: " + transformer_.get_error();
+        return false;
+    }
+    return true;
+}
+
 // WAV file loading (16-bit PCM or 32-bit float)
 bool load_audio_file(const std::string & path, std::vector<float> & samples, 
                      int & sample_rate) {

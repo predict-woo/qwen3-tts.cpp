@@ -245,4 +245,54 @@ const char * qwen3_tts_get_error(const Qwen3Tts * tts) {
     return tts->last_error.c_str();
 }
 
+const char * qwen3_tts_model_type(const Qwen3Tts * tts) {
+    if (!tts) return "";
+    return tts->engine.get_model_type().c_str();
+}
+
+const char * qwen3_tts_model_size(const Qwen3Tts * tts) {
+    if (!tts) return "";
+    return tts->engine.get_model_size().c_str();
+}
+
+int qwen3_tts_has_speaker_encoder(const Qwen3Tts * tts) {
+    return (tts && tts->engine.has_speaker_encoder()) ? 1 : 0;
+}
+
+int32_t qwen3_tts_speaker_count(const Qwen3Tts * tts) {
+    if (!tts) return 0;
+    return (int32_t) tts->engine.get_speaker_names().size();
+}
+
+const char * qwen3_tts_speaker_name(const Qwen3Tts * tts, int32_t i) {
+    if (!tts) return nullptr;
+    const auto & names = tts->engine.get_speaker_names();
+    if (i < 0 || (size_t) i >= names.size()) return nullptr;
+    return names[i].c_str();
+}
+
+const char * qwen3_tts_speaker_dialect(const Qwen3Tts * tts, int32_t i) {
+    if (!tts) return nullptr;
+    const auto & dialects = tts->engine.get_speaker_dialects();
+    if (i < 0 || (size_t) i >= dialects.size()) return nullptr;
+    return dialects[i].c_str();
+}
+
+int32_t qwen3_tts_get_speaker_embedding(
+        Qwen3Tts * tts, const char * speaker_name,
+        float * embedding_out, int32_t max_size) {
+    if (!tts || !speaker_name || !embedding_out || max_size <= 0) return -1;
+    std::vector<float> embedding;
+    if (!tts->engine.get_speaker_embedding(speaker_name, embedding)) {
+        tts->last_error = tts->engine.get_error();
+        return -1;
+    }
+    if ((int32_t) embedding.size() > max_size) {
+        tts->last_error = "embedding_out buffer too small";
+        return -1;
+    }
+    std::memcpy(embedding_out, embedding.data(), embedding.size() * sizeof(float));
+    return (int32_t) embedding.size();
+}
+
 } // extern "C"

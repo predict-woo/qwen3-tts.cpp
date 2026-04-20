@@ -128,6 +128,31 @@ def _load_library() -> ctypes.CDLL:
     lib.qwen3_tts_get_error.argtypes = [ctypes.c_void_p]
     lib.qwen3_tts_get_error.restype = ctypes.c_char_p
 
+    # -- model metadata + preset voices --
+    lib.qwen3_tts_model_type.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_model_type.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_model_size.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_model_size.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_has_speaker_encoder.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_has_speaker_encoder.restype = ctypes.c_int
+
+    lib.qwen3_tts_speaker_count.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_speaker_count.restype = ctypes.c_int32
+
+    lib.qwen3_tts_speaker_name.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.qwen3_tts_speaker_name.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_speaker_dialect.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.qwen3_tts_speaker_dialect.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_get_speaker_embedding.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_float), ctypes.c_int32,
+    ]
+    lib.qwen3_tts_get_speaker_embedding.restype = ctypes.c_int32
+
     return lib
 
 
@@ -198,6 +223,67 @@ class QwenTTS:
             err = self._get_error()
             raise RuntimeError(f"Failed to extract embedding: {err}")
         return list(buf[:result])
+
+    # -- Model metadata + preset voices -------------------------------------
+
+    @property
+    def model_type(self) -> str:
+        """Model variant: 'base', 'custom_voice', or 'voice_design'."""
+        raw = self._lib.qwen3_tts_model_type(self._handle)
+        return raw.decode("utf-8") if raw else ""
+
+    @property
+    def model_size(self) -> str:
+        """Model size tag ('0b6', '1b7', ...) or empty on older GGUFs."""
+        raw = self._lib.qwen3_tts_model_size(self._handle)
+        return raw.decode("utf-8") if raw else ""
+
+    @property
+    def has_speaker_encoder(self) -> bool:
+        """True if the model ships an ECAPA-TDNN speaker encoder."""
+        return bool(self._lib.qwen3_tts_has_speaker_encoder(self._handle))
+
+    def list_speakers(self) -> list[dict]:
+        """List preset voices baked into the model. Empty for Base variants.
+
+        Each entry is a dict with keys: name, dialect (str, '' if none).
+        """
+        n = int(self._lib.qwen3_tts_speaker_count(self._handle))
+        out = []
+        for i in range(n):
+            name_ptr = self._lib.qwen3_tts_speaker_name(self._handle, i)
+            dialect_ptr = self._lib.qwen3_tts_speaker_dialect(self._handle, i)
+            if not name_ptr:
+                continue
+            name = name_ptr.decode("utf-8")
+            dialect = dialect_ptr.decode("utf-8") if dialect_ptr else ""
+            out.append({"name": name, "dialect": dialect})
+        return out
+
+    def get_speaker_embedding(self, name: str) -> list[float]:
+        """Materialize a preset voice's speaker embedding (hidden_size floats).
+
+        Raises RuntimeError if the preset name is unknown.
+        """
+        buf_size = 4096  # generous: hidden_size is 1024 (0.6B) or 2048 (1.7B)
+        buf = (ctypes.c_float * buf_size)()
+        result = self._lib.qwen3_tts_get_speaker_embedding(
+            self._handle, name.encode("utf-8"), buf, buf_size,
+        )
+        if result < 0:
+            err = self._get_error()
+            raise RuntimeError(f"Failed to get speaker embedding '{name}': {err}")
+        return list(buf[:result])
+
+    def synthesize_with_preset(
+        self,
+        text: str,
+        speaker: str,
+        **synthesize_kwargs,
+    ) -> tuple[list[float], int]:
+        """Synthesize using a built-in preset voice by name."""
+        embedding = self.get_speaker_embedding(speaker)
+        return self.synthesize_with_embedding(text, embedding, **synthesize_kwargs)
 
     def close(self):
         """Destroy the engine and release resources."""

@@ -139,10 +139,30 @@ public:
 
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
-    
+
+    // Model metadata
+    const std::string & get_model_type() const;  // "base" | "custom_voice" | "voice_design"
+    const std::string & get_model_size() const;  // e.g. "0b6" | "1b7" (empty on older GGUFs)
+    bool has_speaker_encoder() const;            // true if ECAPA-TDNN x-vector path works
+
+    // Preset voice table (CustomVoice / VoiceDesign). Empty for Base and for
+    // GGUFs converted before preset-metadata support.
+    const std::vector<std::string> & get_speaker_names() const;
+    const std::vector<int32_t>     & get_speaker_ids() const;
+    const std::vector<std::string> & get_speaker_dialects() const;
+
+    // Look up a preset voice by name. Returns -1 if not found.
+    int32_t get_speaker_id(const std::string & name) const;
+
+    // Resolve a preset voice to the speaker embedding (codec_embd row at the
+    // preset's token ID). Returns false if the name is unknown or the
+    // underlying tensor is missing. On success, `out` is resized to
+    // hidden_size and filled with float32 values.
+    bool get_speaker_embedding(const std::string & name, std::vector<float> & out);
+
     // Get error message
     const std::string & get_error() const { return error_msg_; }
-    
+
     // Check if models are loaded
     bool is_loaded() const { return models_loaded_; }
     

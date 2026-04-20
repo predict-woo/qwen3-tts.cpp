@@ -26,6 +26,8 @@ void print_usage(const char * program) {
     fprintf(stderr, "  --seed <n>             RNG seed for reproducible output (default: random)\n");
     fprintf(stderr, "  --no-f32-acc           Disable f32 matmul accumulation (faster, less precise)\n");
     fprintf(stderr, "  -i, --instruction <text>  Voice steering instruction (e.g. \"Speak happily\")\n");
+    fprintf(stderr, "  --speaker <name>       Use a built-in preset voice (CustomVoice models only)\n");
+    fprintf(stderr, "  --list-speakers        List preset voices available in the loaded model and exit\n");
     fprintf(stderr, "  -l, --language <lang>  Language: en,ru,zh,ja,ko,de,fr,es (default: en)\n");
     fprintf(stderr, "  -j, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  -h, --help             Show this help\n");
@@ -51,6 +53,8 @@ int main(int argc, char ** argv) {
     std::string reference_audio;
     std::string speaker_embedding_file;
     std::string dump_speaker_embedding_file;
+    std::string speaker_preset;
+    bool list_speakers = false;
     
     qwen3_tts::tts_params params;
     
@@ -109,6 +113,14 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             dump_speaker_embedding_file = argv[i];
+        } else if (arg == "--speaker") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing speaker name\n");
+                return 1;
+            }
+            speaker_preset = argv[i];
+        } else if (arg == "--list-speakers") {
+            list_speakers = true;
         } else if (arg == "--temperature") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing temperature value\n");
@@ -192,8 +204,8 @@ int main(int argc, char ** argv) {
         print_usage(argv[0]);
         return 1;
     }
-    
-    if (text.empty()) {
+
+    if (text.empty() && !list_speakers) {
         fprintf(stderr, "Error: text is required\n");
         print_usage(argv[0]);
         return 1;
@@ -208,15 +220,57 @@ int main(int argc, char ** argv) {
         return 1;
     }
     
+    // Handle --list-speakers: just print and exit.
+    if (list_speakers) {
+        const auto & names = tts.get_speaker_names();
+        const auto & ids = tts.get_speaker_ids();
+        const auto & dialects = tts.get_speaker_dialects();
+        fprintf(stderr, "Model type: %s\n", tts.get_model_type().c_str());
+        if (names.empty()) {
+            fprintf(stderr, "No preset voices available in this model.\n");
+            fprintf(stderr, "(Preset voices are only present in CustomVoice / VoiceDesign variants.)\n");
+            return 0;
+        }
+        fprintf(stderr, "Preset voices (%zu):\n", names.size());
+        for (size_t i = 0; i < names.size(); ++i) {
+            const std::string & d = i < dialects.size() ? dialects[i] : std::string();
+            if (!d.empty()) {
+                fprintf(stderr, "  %-16s (id=%d, dialect=%s)\n", names[i].c_str(), ids[i], d.c_str());
+            } else {
+                fprintf(stderr, "  %-16s (id=%d)\n", names[i].c_str(), ids[i]);
+            }
+        }
+        return 0;
+    }
+
     // Set progress callback
     tts.set_progress_callback([](int tokens, int max_tokens) {
         fprintf(stderr, "\rGenerating: %d/%d tokens", tokens, max_tokens);
     });
-    
+
     // Generate speech
     qwen3_tts::tts_result result;
 
-    if (!speaker_embedding_file.empty()) {
+    if (!speaker_preset.empty()) {
+        // Preset voice from CustomVoice model: resolve name → codec_embd row.
+        std::vector<float> embedding;
+        if (!tts.get_speaker_embedding(speaker_preset, embedding)) {
+            fprintf(stderr, "Error: %s\n", tts.get_error().c_str());
+            const auto & names = tts.get_speaker_names();
+            if (!names.empty()) {
+                fprintf(stderr, "Available presets:");
+                for (const auto & n : names) fprintf(stderr, " %s", n.c_str());
+                fprintf(stderr, "\n");
+            } else {
+                fprintf(stderr, "This model has no preset voices (model_type=%s). Use a CustomVoice or VoiceDesign GGUF.\n",
+                        tts.get_model_type().c_str());
+            }
+            return 1;
+        }
+        fprintf(stderr, "Synthesizing with preset voice '%s' (%d dims): \"%s\"\n",
+                speaker_preset.c_str(), (int)embedding.size(), text.c_str());
+        result = tts.synthesize_with_embedding(text, embedding.data(), (int32_t)embedding.size(), params);
+    } else if (!speaker_embedding_file.empty()) {
         // Use precomputed speaker embedding
         std::vector<float> embedding;
         if (!qwen3_tts::load_speaker_embedding(speaker_embedding_file, embedding)) {

@@ -361,7 +361,51 @@ bool TTSTransformer::parse_config(struct gguf_context * ctx) {
         "qwen3-tts.codec.language.english_id",
         "qwen3-tts.language_id",
     }, 2050);
-    
+
+    // Model variant metadata (optional — absent on older GGUFs).
+    auto get_str = [&](const char * key) -> std::string {
+        int64_t idx = gguf_find_key(ctx, key);
+        if (idx < 0) return {};
+        return gguf_get_val_str(ctx, idx);
+    };
+    auto read_str_array = [&](const char * key, std::vector<std::string> & out) {
+        int64_t idx = gguf_find_key(ctx, key);
+        if (idx < 0) return;
+        if (gguf_get_kv_type(ctx, idx) != GGUF_TYPE_ARRAY) return;
+        if (gguf_get_arr_type(ctx, idx) != GGUF_TYPE_STRING) return;
+        size_t n = gguf_get_arr_n(ctx, idx);
+        out.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = gguf_get_arr_str(ctx, idx, i);
+        }
+    };
+    auto read_u32_array = [&](const char * key, std::vector<int32_t> & out) {
+        int64_t idx = gguf_find_key(ctx, key);
+        if (idx < 0) return;
+        if (gguf_get_kv_type(ctx, idx) != GGUF_TYPE_ARRAY) return;
+        // Accept both UINT32 (preferred) and INT32 (gguf-py's default for
+        // Python int lists). Both are 32-bit so the raw read is identical.
+        gguf_type at = gguf_get_arr_type(ctx, idx);
+        if (at != GGUF_TYPE_UINT32 && at != GGUF_TYPE_INT32) return;
+        size_t n = gguf_get_arr_n(ctx, idx);
+        out.resize(n);
+        const int32_t * data = (const int32_t *) gguf_get_arr_data(ctx, idx);
+        for (size_t i = 0; i < n; ++i) {
+            out[i] = data[i];
+        }
+    };
+
+    cfg.model_type = get_str("qwen3-tts.model_type");
+    if (cfg.model_type.empty()) cfg.model_type = "base";
+    cfg.model_size = get_str("qwen3-tts.model_size");
+    cfg.has_speaker_encoder = (gguf_find_key(ctx, "qwen3-tts.speaker_encoder.embedding_length") >= 0);
+
+    read_str_array("qwen3-tts.speaker.names", cfg.speaker_names);
+    read_u32_array("qwen3-tts.speaker.ids", cfg.speaker_ids);
+    read_str_array("qwen3-tts.speaker.dialects", cfg.speaker_dialects);
+    read_str_array("qwen3-tts.language.names", cfg.language_names);
+    read_u32_array("qwen3-tts.language.ids", cfg.language_ids);
+
     return true;
 }
 
@@ -949,6 +993,15 @@ bool TTSTransformer::lookup_single_embedding_row(struct ggml_tensor * embedding,
     }
     memcpy(out_row, single_out.data(), (size_t) embd_dim * sizeof(float));
     return true;
+}
+
+bool TTSTransformer::get_codec_embedding_row(int32_t token_id, std::vector<float> & out) {
+    if (!model_.codec_embd) {
+        error_msg_ = "codec_embd tensor not loaded";
+        return false;
+    }
+    out.assign((size_t) model_.config.hidden_size, 0.0f);
+    return lookup_single_embedding_row(model_.codec_embd, token_id, out.data());
 }
 
 bool TTSTransformer::project_text_tokens(const int32_t * text_tokens, int32_t n_tokens,

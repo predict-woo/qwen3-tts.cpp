@@ -101,6 +101,20 @@ struct tts_transformer_config {
     int32_t codec_think_eos_id = 2157;
 
     int32_t english_language_id = 2050;
+
+    // Model variant metadata (from converter, optional)
+    std::string model_type;  // "base" | "custom_voice" | "voice_design"
+    std::string model_size;  // e.g. "0b6" | "1b7"
+    bool has_speaker_encoder = false;
+
+    // Speaker presets (CustomVoice models). Parallel vectors, same length.
+    std::vector<std::string> speaker_names;
+    std::vector<int32_t>     speaker_ids;
+    std::vector<std::string> speaker_dialects;  // "" if not a dialect preset
+
+    // Language table (codec language IDs)
+    std::vector<std::string> language_names;
+    std::vector<int32_t>     language_ids;
 };
 
 // Transformer layer weights
@@ -219,6 +233,13 @@ public:
     // Clear code predictor KV cache
     void clear_code_pred_kv_cache();
     
+    // Read a row from the talker codec embedding table [hidden_size] and
+    // return it as float32. Used to resolve CustomVoice preset voices
+    // (where each preset is a reserved codec token ID whose codec_embd row
+    // is the "speaker embedding" fed into prefill position 7).
+    // Returns false if the token ID is out of range or the tensor is missing.
+    bool get_codec_embedding_row(int32_t token_id, std::vector<float> & out);
+
     // Forward pass for text tokens (prefill phase)
     // text_tokens: input text token IDs [n_tokens]
     // speaker_embd: speaker embedding [hidden_size] (optional, can be nullptr)
