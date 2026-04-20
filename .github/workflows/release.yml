@@ -2,7 +2,8 @@ name: Release builds
 
 on:
   push:
-    branches: [main]
+    # ci/release-builds is included during Task 4 validation; remove before merging to main.
+    branches: [main, ci/release-builds]
     tags: ['v*']
   workflow_dispatch:
 
