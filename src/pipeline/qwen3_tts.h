@@ -3,6 +3,7 @@
 #include "tokenizer/text_tokenizer.h"
 #include "transformer/tts_transformer.h"
 #include "encoder/audio_tokenizer_encoder.h"
+#include "encoder/audio_codec_encoder.h"
 #include "decoder/audio_tokenizer_decoder.h"
 
 #include <string>
@@ -15,7 +16,7 @@ namespace qwen3_tts {
 // TTS generation parameters
 struct tts_params {
     // Maximum number of audio tokens to generate
-    int32_t max_audio_tokens = 4096;
+    int32_t max_audio_tokens = 2048;
     
     // Temperature for sampling (0 = greedy)
     float temperature = 0.9f;
@@ -49,6 +50,14 @@ struct tts_params {
 
     // Voice steering instruction (e.g. "Speak happily", "Use a deep voice")
     std::string instruction;
+
+    // Reference transcript for ICL voice cloning. When non-empty alongside a
+    // reference audio source (`-r` / `synthesize_with_voice`), the pipeline
+    // encodes the reference audio with the Mimi codec and threads both the
+    // codes and the transcript into the talker prefill (Qwen's intended
+    // cloning mode for Base variants). If empty, voice cloning falls back to
+    // x-vector-only conditioning.
+    std::string ref_text;
 };
 
 // TTS generation result
@@ -139,10 +148,30 @@ public:
 
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
-    
+
+    // Model metadata
+    const std::string & get_model_type() const;  // "base" | "custom_voice" | "voice_design"
+    const std::string & get_model_size() const;  // e.g. "0b6" | "1b7" (empty on older GGUFs)
+    bool has_speaker_encoder() const;            // true if ECAPA-TDNN x-vector path works
+
+    // Preset voice table (CustomVoice / VoiceDesign). Empty for Base and for
+    // GGUFs converted before preset-metadata support.
+    const std::vector<std::string> & get_speaker_names() const;
+    const std::vector<int32_t>     & get_speaker_ids() const;
+    const std::vector<std::string> & get_speaker_dialects() const;
+
+    // Look up a preset voice by name. Returns -1 if not found.
+    int32_t get_speaker_id(const std::string & name) const;
+
+    // Resolve a preset voice to the speaker embedding (codec_embd row at the
+    // preset's token ID). Returns false if the name is unknown or the
+    // underlying tensor is missing. On success, `out` is resized to
+    // hidden_size and filled with float32 values.
+    bool get_speaker_embedding(const std::string & name, std::vector<float> & out);
+
     // Get error message
     const std::string & get_error() const { return error_msg_; }
-    
+
     // Check if models are loaded
     bool is_loaded() const { return models_loaded_; }
     
@@ -150,15 +179,19 @@ private:
     tts_result synthesize_internal(const std::string & text,
                                    const float * speaker_embedding,
                                    const tts_params & params,
-                                   tts_result & result);
-    
+                                   tts_result & result,
+                                   const int32_t * ref_codes = nullptr,
+                                   int32_t n_ref_frames = 0);
+
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;
     AudioTokenizerEncoder audio_encoder_;
+    AudioCodecEncoder codec_encoder_;
     AudioTokenizerDecoder audio_decoder_;
     
     bool models_loaded_ = false;
     bool encoder_loaded_ = false;
+    bool codec_encoder_loaded_ = false;
     bool transformer_loaded_ = false;
     bool decoder_loaded_ = false;
     bool low_mem_mode_ = false;

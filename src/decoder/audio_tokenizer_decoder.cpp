@@ -59,8 +59,6 @@ void AudioTokenizerDecoder::unload_model() {
 
     state_.compute_meta.clear();
     codes_buf_.clear();
-    cached_graph_ = nullptr;
-    cached_n_frames_ = -1;
 }
 
 void AudioTokenizerDecoder::normalize_codebooks() {
@@ -874,14 +872,12 @@ bool AudioTokenizerDecoder::decode_single(const int32_t * codes, int32_t n_frame
         }
     }
     
-    struct ggml_cgraph * gf;
-    if (cached_graph_ && cached_n_frames_ == n_frames) {
-        gf = cached_graph_;
-    } else {
-        gf = build_graph(n_frames);
-        cached_graph_ = gf;
-        cached_n_frames_ = n_frames;
-    }
+    // Rebuild the graph every call. Reusing a cached graph across calls with
+    // the same n_frames produced saturated audio on the second-and-later
+    // calls because the scheduler's scratch buffers were reused with stale
+    // contents. Per khimaros/qwen3-tts.cpp c215ab0; root cause not fully
+    // understood, so take the safe path until it is.
+    struct ggml_cgraph * gf = build_graph(n_frames);
 
     if (!ggml_backend_sched_alloc_graph(state_.sched, gf)) {
         error_msg_ = "Failed to allocate graph";

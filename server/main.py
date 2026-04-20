@@ -59,13 +59,31 @@ async def lifespan(app: FastAPI):
     global tts_engine
     print(f"Loading qwen3-tts models from: {MODEL_DIR}")
     tts_engine = QwenTTS(MODEL_DIR, n_threads=N_THREADS)
-    print(f"Models loaded. Scanning voices from: {VOICES_DIR}")
+    print(f"Model loaded: type={tts_engine.model_type} size={tts_engine.model_size}")
+    print(f"Scanning voices from: {VOICES_DIR}")
     load_voices()
-    print(f"Ready. {len(voice_embeddings)} voice(s) available.")
+    presets = tts_engine.list_speakers()
+    print(f"Ready. {len(voice_embeddings)} JSON voice(s), {len(presets)} model preset(s).")
     yield
     if tts_engine:
         tts_engine.close()
         tts_engine = None
+
+
+def _resolve_voice(voice: str):
+    """Resolve a voice name to ('json', name) | ('preset', name) | ('default', None).
+
+    Precedence: exact match in local JSON voices dir, then model presets.
+    """
+    if voice == "default":
+        return ("default", None)
+    if voice in voice_embeddings:
+        return ("json", voice)
+    if tts_engine is not None:
+        for p in tts_engine.list_speakers():
+            if p["name"] == voice:
+                return ("preset", voice)
+    return (None, None)
 
 
 app = FastAPI(title="qwen3-tts server", lifespan=lifespan)
@@ -119,6 +137,12 @@ class SpeechRequest(BaseModel):
     response_format: str = "wav"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
 
+    # ICL voice cloning: supply a path to a reference WAV on the server's
+    # filesystem together with its transcript. When both are set, the request
+    # takes the Mimi codec path; `voice` is ignored in that case.
+    reference_audio_path: str | None = None
+    reference_text: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -135,25 +159,53 @@ async def create_speech(request: SpeechRequest):
     # Map speed to temperature: speed=1.0 → temp=0.9, speed=2.0 → temp=0.45
     temperature = min(2.0, max(0.1, 0.9 / request.speed))
 
+    # ICL path: both reference_audio_path and reference_text provided.
+    icl_ref_audio = (request.reference_audio_path or "").strip()
+    icl_ref_text  = (request.reference_text or "").strip()
+    if icl_ref_audio and icl_ref_text:
+        if not os.path.isfile(icl_ref_audio):
+            raise HTTPException(status_code=400, detail={"error": {"message": f"reference_audio_path does not exist: {icl_ref_audio}", "type": "invalid_request_error"}})
+        try:
+            def _do_icl():
+                with _synthesis_lock:
+                    return tts_engine.synthesize_icl(
+                        request.input, icl_ref_audio, icl_ref_text,
+                        temperature=temperature,
+                    )
+            loop = asyncio.get_event_loop()
+            samples, sample_rate = await loop.run_in_executor(None, _do_icl)
+            wav_data = pcm_float32_to_wav(samples, sample_rate)
+            return Response(content=wav_data, media_type="audio/wav")
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail={"error": {"message": str(e), "type": "server_error"}})
+    elif icl_ref_audio or icl_ref_text:
+        raise HTTPException(status_code=400, detail={"error": {"message": "reference_audio_path and reference_text must be provided together for ICL mode", "type": "invalid_request_error"}})
+
     voice = request.voice.lower()
 
-    # Validate voice name
-    if voice != "default" and voice not in voice_embeddings:
-        available = ", ".join(["default"] + sorted(voice_embeddings.keys()))
-        raise HTTPException(status_code=400, detail={"error": {"message": f"Unknown voice '{request.voice}'. Available: {available}", "type": "invalid_request_error"}})
+    # Resolve voice: 'default' | local JSON voice | model preset
+    kind, resolved = _resolve_voice(voice)
+    if kind is None:
+        preset_names = [p["name"] for p in (tts_engine.list_speakers() if tts_engine else [])]
+        available = sorted(set(["default"] + list(voice_embeddings.keys()) + preset_names))
+        raise HTTPException(status_code=400, detail={"error": {"message": f"Unknown voice '{request.voice}'. Available: {', '.join(available)}", "type": "invalid_request_error"}})
 
     try:
         def _do_synthesis():
             with _synthesis_lock:
-                if voice == "default":
+                if kind == "default":
                     return tts_engine.synthesize(
                         request.input, temperature=temperature,
                     )
-                else:
-                    embedding = voice_embeddings[voice]
+                if kind == "json":
+                    embedding = voice_embeddings[resolved]
                     return tts_engine.synthesize_with_embedding(
                         request.input, embedding, temperature=temperature,
                     )
+                # kind == "preset"
+                return tts_engine.synthesize_with_preset(
+                    request.input, resolved, temperature=temperature,
+                )
 
         loop = asyncio.get_event_loop()
         samples, sample_rate = await loop.run_in_executor(None, _do_synthesis)
@@ -167,9 +219,18 @@ async def create_speech(request: SpeechRequest):
 
 @app.get("/v1/audio/voices")
 async def list_voices():
-    """List available voice names."""
-    voices = ["default"] + sorted(voice_embeddings.keys())
-    return {"voices": voices}
+    """List available voice names (local JSONs + model presets)."""
+    presets = tts_engine.list_speakers() if tts_engine else []
+    json_voices = [{"name": n, "source": "json"} for n in sorted(voice_embeddings.keys())]
+    preset_voices = [
+        {"name": p["name"], "source": "preset", "dialect": p.get("dialect", "")}
+        for p in presets
+    ]
+    return {
+        "voices": ["default"] + sorted(voice_embeddings.keys()) + [p["name"] for p in presets],
+        "detail": [{"name": "default", "source": "default"}] + json_voices + preset_voices,
+        "model_type": tts_engine.model_type if tts_engine else "",
+    }
 
 
 @app.get("/health")

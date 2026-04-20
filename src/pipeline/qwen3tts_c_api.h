@@ -13,7 +13,7 @@ typedef struct Qwen3Tts Qwen3Tts;
 
 /* Generation parameters */
 typedef struct Qwen3TtsParams {
-    int32_t max_audio_tokens;    /* default: 4096 */
+    int32_t max_audio_tokens;    /* default: 2048 */
     float   temperature;         /* default: 0.9, 0=greedy */
     float   top_p;               /* default: 1.0 */
     int32_t top_k;               /* default: 50, 0=disabled */
@@ -97,8 +97,55 @@ Qwen3TtsAudio* qwen3_tts_synthesize_with_embedding(
     int32_t embedding_size,
     const Qwen3TtsParams* params);
 
+/* Synthesize with in-context-learning (ICL) voice cloning.
+ * Encodes the reference audio through the Mimi codec and threads the
+ * resulting codes plus the reference transcript into the talker prefill —
+ * Qwen's intended cloning mode for Base variants.
+ *
+ * reference_audio_path: path to reference WAV (24kHz mono recommended).
+ * reference_text:       transcript of the reference audio (same language).
+ * Returns NULL on failure. Caller must free with qwen3_tts_free_audio(). */
+Qwen3TtsAudio* qwen3_tts_synthesize_icl_file(
+    Qwen3Tts* tts,
+    const char* text,
+    const char* reference_audio_path,
+    const char* reference_text,
+    const Qwen3TtsParams* params);
+
 /* Get last error message (or empty string) */
 const char* qwen3_tts_get_error(const Qwen3Tts* tts);
+
+/* --- Model metadata + preset voices ----------------------------------- */
+
+/* Returns the model variant: "base", "custom_voice", or "voice_design".
+ * Pointer is owned by the engine and valid until qwen3_tts_destroy(). */
+const char* qwen3_tts_model_type(const Qwen3Tts* tts);
+
+/* Returns the model size tag: "0b6", "1b7", etc. Empty on older GGUFs. */
+const char* qwen3_tts_model_size(const Qwen3Tts* tts);
+
+/* Returns 1 if the model ships an ECAPA-TDNN speaker encoder, else 0. */
+int qwen3_tts_has_speaker_encoder(const Qwen3Tts* tts);
+
+/* Number of preset voices in the loaded model (0 for Base variants). */
+int32_t qwen3_tts_speaker_count(const Qwen3Tts* tts);
+
+/* Name of the i-th preset voice, or NULL if i is out of range.
+ * Pointer is owned by the engine. */
+const char* qwen3_tts_speaker_name(const Qwen3Tts* tts, int32_t i);
+
+/* Dialect tag of the i-th preset voice (e.g. "sichuan_dialect").
+ * Empty string if the preset is not a dialect, NULL if i is out of range. */
+const char* qwen3_tts_speaker_dialect(const Qwen3Tts* tts, int32_t i);
+
+/* Write the preset voice's speaker embedding into embedding_out. Returns the
+ * embedding size (hidden_size) on success, -1 if the name is unknown or
+ * max_size is insufficient. */
+int32_t qwen3_tts_get_speaker_embedding(
+    Qwen3Tts* tts,
+    const char* speaker_name,
+    float* embedding_out,
+    int32_t max_size);
 
 #ifdef __cplusplus
 }

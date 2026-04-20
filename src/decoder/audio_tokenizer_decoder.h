@@ -232,10 +232,6 @@ private:
     audio_decoder_state state_;
     std::string error_msg_;
 
-    // Graph cache: reuse graph when frame count matches
-    struct ggml_cgraph * cached_graph_ = nullptr;
-    int32_t cached_n_frames_ = -1;
-
     // Temporary storage for codes input
     std::vector<int32_t> codes_buf_;
 };

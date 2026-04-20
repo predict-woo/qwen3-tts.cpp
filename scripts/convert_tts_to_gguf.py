@@ -195,8 +195,51 @@ class Qwen3TTSConverter:
         self.codec_bos_id = talker_config.get("codec_bos_id", 2149)
         self.codec_eos_id = talker_config.get("codec_eos_token_id", 2150)
 
-        # Model name
-        self.model_name = "Qwen3-TTS-12Hz-0.6B"
+        # Model variant metadata
+        # tts_model_type: "base" | "custom_voice" | "voice_design"
+        # tts_model_size: e.g. "0b6" | "1b7"
+        self.tts_model_type = str(self.config.get("tts_model_type", "base"))
+        self.tts_model_size = str(self.config.get("tts_model_size", ""))
+
+        # Speaker preset table (CustomVoice variants only)
+        # talker_config.spk_id: {"serena": 3066, "vivian": 3065, ...}
+        # talker_config.spk_is_dialect: {"eric": "sichuan_dialect", "dylan": "beijing_dialect", ...}
+        spk_id = talker_config.get("spk_id", {}) or {}
+        spk_is_dialect = talker_config.get("spk_is_dialect", {}) or {}
+        # Sort by token ID for stable ordering.
+        self.speaker_names: list[str] = []
+        self.speaker_ids: list[int] = []
+        self.speaker_dialects: list[str] = []
+        for name, tid in sorted(spk_id.items(), key=lambda kv: (kv[1], kv[0])):
+            try:
+                tid_int = int(tid)
+            except (TypeError, ValueError):
+                continue
+            self.speaker_names.append(str(name))
+            self.speaker_ids.append(tid_int)
+            dialect = spk_is_dialect.get(name, False)
+            self.speaker_dialects.append(str(dialect) if isinstance(dialect, str) else "")
+
+        # Language table (codec language IDs)
+        codec_language_id = talker_config.get("codec_language_id", {}) or {}
+        self.language_names: list[str] = []
+        self.language_ids: list[int] = []
+        for name, tid in sorted(codec_language_id.items(), key=lambda kv: (kv[1], kv[0])):
+            try:
+                tid_int = int(tid)
+            except (TypeError, ValueError):
+                continue
+            self.language_names.append(str(name))
+            self.language_ids.append(tid_int)
+
+        # Model name — derive from size/type so the converted GGUF is labelled
+        # correctly instead of always claiming to be 0.6B.
+        # HF uses "0b6" / "1b7" for size; translate to "0.6B" / "1.7B".
+        if self.tts_model_size:
+            size_label = self.tts_model_size.replace("b", ".").upper() + "B"
+        else:
+            size_label = "UNKNOWN"
+        self.model_name = f"Qwen3-TTS-12Hz-{size_label}-{self.tts_model_type}"
 
     def _map_tensor_name(self, hf_name: str) -> str | None:
         """Map HuggingFace tensor name to GGML convention."""
@@ -475,6 +518,18 @@ class Qwen3TTSConverter:
             writer.add_uint32(f"{arch}.code_pred.attention.head_count_kv", self.code_pred_n_key_value_heads)
             writer.add_uint32(f"{arch}.code_pred.feed_forward_length", self.code_pred_intermediate_size)
             writer.add_uint32(f"{arch}.code_pred.attention.key_length", self.code_pred_head_dim)
+
+        # Model variant + preset metadata
+        writer.add_string(f"{arch}.model_type", self.tts_model_type)
+        if self.tts_model_size:
+            writer.add_string(f"{arch}.model_size", self.tts_model_size)
+        if self.speaker_names:
+            writer.add_array(f"{arch}.speaker.names", self.speaker_names)
+            writer.add_array(f"{arch}.speaker.ids", self.speaker_ids)
+            writer.add_array(f"{arch}.speaker.dialects", self.speaker_dialects)
+        if self.language_names:
+            writer.add_array(f"{arch}.language.names", self.language_names)
+            writer.add_array(f"{arch}.language.ids", self.language_ids)
 
         # Speaker Encoder parameters
         writer.add_uint32(f"{arch}.speaker_encoder.embedding_length", self.speaker_enc_dim)
