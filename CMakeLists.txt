@@ -86,9 +86,13 @@ target_link_libraries(text_tokenizer PUBLIC qwen3_tts_common)
 add_library(tts_transformer STATIC src/transformer/tts_transformer.cpp)
 target_link_libraries(tts_transformer PUBLIC qwen3_tts_common)
 
-# Audio tokenizer encoder library
+# Audio tokenizer encoder library (ECAPA-TDNN x-vector speaker encoder)
 add_library(audio_tokenizer_encoder STATIC src/encoder/audio_tokenizer_encoder.cpp)
 target_link_libraries(audio_tokenizer_encoder PUBLIC qwen3_tts_common)
+
+# Audio codec encoder library (Mimi codec for ICL voice cloning)
+add_library(audio_codec_encoder STATIC src/encoder/audio_codec_encoder.cpp)
+target_link_libraries(audio_codec_encoder PUBLIC qwen3_tts_common)
 
 # Audio tokenizer decoder library
 add_library(audio_tokenizer_decoder STATIC src/decoder/audio_tokenizer_decoder.cpp)
@@ -100,6 +104,7 @@ target_link_libraries(qwen3_tts PUBLIC
     text_tokenizer
     tts_transformer
     audio_tokenizer_encoder
+    audio_codec_encoder
     audio_tokenizer_decoder
 )
 
@@ -162,6 +167,16 @@ target_link_libraries(test_transformer PRIVATE
     Threads::Threads
 )
 
+# Test executable for Mimi codec encoder (ICL voice cloning)
+add_executable(test_codec_encoder
+    tests/test_codec_encoder.cpp
+)
+target_link_libraries(test_codec_encoder PRIVATE
+    audio_codec_encoder
+    qwen3_tts
+    Threads::Threads
+)
+
 # Test executable for audio decoder
 add_executable(test_decoder
     tests/test_decoder.cpp
@@ -172,7 +187,7 @@ target_link_libraries(test_decoder PRIVATE
 )
 
 # Install targets
-install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
+install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_codec_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
