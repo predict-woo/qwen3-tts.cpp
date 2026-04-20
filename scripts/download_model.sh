@@ -47,19 +47,24 @@ download_one() {
 
     echo "[download] $url"
     echo "       --> $out"
+    # Remove any leftover .part from a previous failed run, and ensure
+    # a mid-download failure doesn't leave a .part behind that a user
+    # might later mistake for a resumable state.
+    rm -f "$out.part"
+    trap 'rm -f "$out.part"' ERR
     case "$DOWNLOADER" in
         curl)
             # -L follow redirects, -f fail on HTTP errors, -# progress bar,
             # -o output path. Write to a .part file and rename on success so
             # an interrupted download doesn't look like a completed one.
             curl -L -f -# -o "$out.part" "$url"
-            mv "$out.part" "$out"
             ;;
         wget)
-            wget -O "$out.part" "$url"
-            mv "$out.part" "$out"
+            wget --tries=3 --timeout=30 --show-progress -O "$out.part" "$url"
             ;;
     esac
+    mv "$out.part" "$out"
+    trap - ERR
     echo "[ok] $out"
 }
 
