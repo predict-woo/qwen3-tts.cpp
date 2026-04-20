@@ -1,0 +1,100 @@
+name: Release builds
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  compute-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_tag: ${{ steps.v.outputs.is_tag }}
+    steps:
+      - id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            echo "is_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            VERSION="nightly-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+            echo "is_tag=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+
+  build:
+    needs: compute-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, backend: cpu, name: linux-cpu }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.compute-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential zip
+
+      - name: Configure ggml
+        shell: bash
+        run: |
+          FLAGS="-DCMAKE_BUILD_TYPE=Release"
+          case "${{ matrix.backend }}" in
+            cpu)    : ;;
+            vulkan) FLAGS="$FLAGS -DGGML_VULKAN=ON" ;;
+            cuda)   FLAGS="$FLAGS -DGGML_CUDA=ON" ;;
+            metal)  FLAGS="$FLAGS -DGGML_METAL=ON" ;;
+          esac
+          cmake -S ggml -B ggml/build $FLAGS
+
+      - name: Build ggml
+        run: cmake --build ggml/build --config Release -j
+
+      - name: Configure project
+        shell: bash
+        run: |
+          FLAGS="-DCMAKE_BUILD_TYPE=Release"
+          if [ "${{ runner.os }}" != "macOS" ]; then
+            FLAGS="$FLAGS -DQWEN3_TTS_COREML=OFF"
+          fi
+          cmake -S . -B build $FLAGS
+
+      - name: Build project
+        run: cmake --build build --config Release -j --target qwen3-tts-cli qwen3-tts-quantize
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          PKG="qwen3-tts-${VERSION}-${{ matrix.name }}"
+          mkdir -p "dist/$PKG/examples" "dist/$PKG/scripts"
+          cp build/qwen3-tts-cli      "dist/$PKG/"
+          cp build/qwen3-tts-quantize "dist/$PKG/"
+          # GGML runtime shared libs (if any — static build produces none)
+          find ggml/build -maxdepth 4 \( -name 'libggml*.so*' -o -name 'libggml*.dylib' \) -exec cp {} "dist/$PKG/" \; || true
+          cp examples/*.wav                  "dist/$PKG/examples/"
+          cp scripts/download_model.sh       "dist/$PKG/scripts/"
+          cp scripts/download_model.bat      "dist/$PKG/scripts/"
+          cp .github/packaging/README.txt    "dist/$PKG/"
+          cp LICENSE                         "dist/$PKG/" 2>/dev/null || true
+          chmod +x "dist/$PKG/scripts/download_model.sh"
+          chmod +x "dist/$PKG/qwen3-tts-cli" "dist/$PKG/qwen3-tts-quantize"
+          cd dist && zip -r "${PKG}.zip" "$PKG"
+          ls -la "${PKG}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen3-tts-${{ env.VERSION }}-${{ matrix.name }}
+          path: dist/qwen3-tts-${{ env.VERSION }}-${{ matrix.name }}.zip
+          retention-days: 14
+          if-no-files-found: error
