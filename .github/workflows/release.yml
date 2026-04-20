@@ -70,8 +70,7 @@ jobs:
           cmake -S . -B build $FLAGS
 
       - name: Build project
-        # Note: this project has no qwen3-tts-quantize tool (unlike llama.cpp); only the CLI is built.
-        run: cmake --build build --config Release -j --target qwen3-tts-cli
+        run: cmake --build build --config Release -j --target qwen3-tts-cli qwen3-tts-quantize
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
@@ -80,15 +79,16 @@ jobs:
           PKG="qwen3-tts-${VERSION}-${{ matrix.name }}"
           mkdir -p "dist/$PKG/examples" "dist/$PKG/scripts"
           cp build/qwen3-tts-cli      "dist/$PKG/"
+          cp build/qwen3-tts-quantize "dist/$PKG/"
           # GGML runtime shared libs (if any — static build produces none)
           find ggml/build -maxdepth 4 \( -name 'libggml*.so*' -o -name 'libggml*.dylib' \) -exec cp {} "dist/$PKG/" \; || true
           cp examples/*.wav                  "dist/$PKG/examples/"
           cp scripts/download_model.sh       "dist/$PKG/scripts/"
           cp scripts/download_model.bat      "dist/$PKG/scripts/"
           cp .github/packaging/README.txt    "dist/$PKG/"
-          cp LICENSE                         "dist/$PKG/" 2>/dev/null || true
+          cp LICENSE                         "dist/$PKG/"
           chmod +x "dist/$PKG/scripts/download_model.sh"
-          chmod +x "dist/$PKG/qwen3-tts-cli"
+          chmod +x "dist/$PKG/qwen3-tts-cli" "dist/$PKG/qwen3-tts-quantize"
           cd dist && zip -r "${PKG}.zip" "$PKG"
           ls -la "${PKG}.zip"
 
