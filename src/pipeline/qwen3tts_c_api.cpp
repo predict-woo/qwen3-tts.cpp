@@ -240,6 +240,24 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_embedding(
     return out;
 }
 
+Qwen3TtsAudio * qwen3_tts_synthesize_icl_file(
+        Qwen3Tts * tts, const char * text,
+        const char * reference_audio_path,
+        const char * reference_text,
+        const Qwen3TtsParams * params) {
+    if (!tts || !text || !reference_audio_path || !reference_text) return nullptr;
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    cpp_params.ref_text = reference_text;
+    auto result = tts->engine.synthesize_with_voice(text, reference_audio_path, cpp_params);
+    if (!result.success) {
+        tts->last_error = result.error_msg;
+    }
+    auto * out = to_c_audio(result);
+    AUTORELEASE_END
+    return out;
+}
+
 const char * qwen3_tts_get_error(const Qwen3Tts * tts) {
     if (!tts) return "";
     return tts->last_error.c_str();

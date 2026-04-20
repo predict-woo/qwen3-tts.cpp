@@ -1075,7 +1075,11 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
                                          const float * speaker_embd, int32_t language_id,
                                          std::vector<float> & prefill_embd,
                                          std::vector<float> & trailing_text_hidden,
-                                         std::vector<float> & tts_pad_embed) {
+                                         std::vector<float> & tts_pad_embed,
+                                         const int32_t * ref_text_tokens,
+                                         int32_t n_ref_text_tokens,
+                                         const int32_t * ref_codes,
+                                         int32_t n_ref_frames) {
     if (!text_tokens) {
         error_msg_ = "text_tokens is null";
         return false;
@@ -1183,6 +1187,150 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
     for (int32_t h = 0; h < hidden_size; ++h) {
         first_text_plus_codec_bos[h] = first_text_embed[h] + codec_bos_embed[h];
     }
+
+    const bool icl_mode = (ref_codes && n_ref_frames > 0 && ref_text_tokens && n_ref_text_tokens > 0);
+
+    if (icl_mode) {
+        // ICL prefill layout (matches khimaros/qwen3-tts.cpp 9c57131, which
+        // mirrors Qwen's generate_icl_prompt non-streaming path):
+        //
+        //   [ role(3), codec_overlay,
+        //     ICL_text  = project(ref_text || new_text || tts_eos) + codec_pad_overlay,
+        //     ICL_codec = codec_bos + sum(ref_codes_per_frame)    + tts_pad_overlay ]
+        //
+        // Trailing is a single tts_pad_embed step (generation continues from
+        // there). All new text content is inside the prefill; we don't run a
+        // separate trailing projection.
+
+        // Strip ref-text framing so we only pass content tokens (callers are
+        // expected to provide content-only, but double-check by trimming if
+        // they supplied the full 8-token framing from encode_for_tts).
+        std::vector<int32_t> ref_content;
+        if (n_ref_text_tokens > 8) {
+            ref_content.assign(ref_text_tokens + 3, ref_text_tokens + n_ref_text_tokens - 5);
+        } else {
+            ref_content.assign(ref_text_tokens, ref_text_tokens + n_ref_text_tokens);
+        }
+
+        // Strip new-text framing: skip 3 role tokens on the front and 5
+        // framing tokens on the tail (matches our encode_for_tts output).
+        const int32_t new_text_content_count = std::max(0, n_tokens - 8);
+        const int32_t * new_text_content = text_tokens + 3;
+
+        std::vector<int32_t> combined_text;
+        combined_text.reserve(ref_content.size() + (size_t) new_text_content_count);
+        combined_text.insert(combined_text.end(), ref_content.begin(), ref_content.end());
+        if (new_text_content_count > 0) {
+            combined_text.insert(combined_text.end(),
+                                 new_text_content,
+                                 new_text_content + new_text_content_count);
+        }
+
+        std::vector<float> text_proj;
+        if (!combined_text.empty()) {
+            if (!project_text_tokens(combined_text.data(), (int32_t) combined_text.size(), text_proj)) {
+                return false;
+            }
+        }
+
+        const int32_t text_len = (int32_t) combined_text.size() + 1; // +1 for tts_eos
+        std::vector<float> icl_text_section((size_t) text_len * hidden_size);
+
+        // Each ICL text position overlays the projected text with the codec_pad embedding.
+        std::vector<float> codec_pad_embed(hidden_size);
+        {
+            int32_t codec_pad_tok = cfg.codec_pad_id;
+            std::vector<float> tmp;
+            if (!lookup_embedding_rows(model_.codec_embd, &codec_pad_tok, 1,
+                                       "inp_icl_codec_pad", "icl_codec_pad_emb", tmp)) {
+                return false;
+            }
+            memcpy(codec_pad_embed.data(), tmp.data(), hidden_size * sizeof(float));
+        }
+
+        for (int32_t t = 0; t < (int32_t) combined_text.size(); ++t) {
+            float * dst = icl_text_section.data() + (size_t) t * hidden_size;
+            const float * row = text_proj.data() + (size_t) t * hidden_size;
+            for (int32_t h = 0; h < hidden_size; ++h) {
+                dst[h] = row[h] + codec_pad_embed[h];
+            }
+        }
+        // tts_eos + codec_pad_overlay at the end of the text section.
+        {
+            float * dst = icl_text_section.data() + (size_t) (text_len - 1) * hidden_size;
+            for (int32_t h = 0; h < hidden_size; ++h) {
+                dst[h] = tts_eos_embed[h] + codec_pad_embed[h];
+            }
+        }
+
+        // ICL codec section: codec_bos + n_ref_frames frames, each frame embedded
+        // as the sum of its codebook embeddings. Codebook 0 uses the talker
+        // codec_embd; codebooks 1..N-1 use code_pred_embd[cb-1].
+        const int32_t codec_section_len = 1 + n_ref_frames;
+        std::vector<float> icl_codec_section((size_t) codec_section_len * hidden_size, 0.0f);
+
+        // codec_bos position: codec_bos_embed + tts_pad_overlay.
+        {
+            int32_t bos_tok = cfg.codec_bos_id;
+            std::vector<float> bos_emb;
+            if (!lookup_embedding_rows(model_.codec_embd, &bos_tok, 1,
+                                       "inp_icl_codec_bos", "icl_codec_bos_emb", bos_emb)) {
+                return false;
+            }
+            float * dst = icl_codec_section.data();
+            for (int32_t h = 0; h < hidden_size; ++h) {
+                dst[h] = bos_emb[h] + tts_pad_embed[h];
+            }
+        }
+
+        const bool skip_ref_codes = std::getenv("QWEN3_TTS_SKIP_REF_CODES") != nullptr;
+        std::vector<float> embd_row(hidden_size);
+        for (int32_t f = 0; f < n_ref_frames; ++f) {
+            float * dst = icl_codec_section.data() + (size_t) (1 + f) * hidden_size;
+            if (skip_ref_codes) {
+                for (int32_t h = 0; h < hidden_size; ++h) dst[h] = tts_pad_embed[h];
+                continue;
+            }
+            for (int cb = 0; cb < cfg.n_codebooks; ++cb) {
+                int32_t code = ref_codes[f * cfg.n_codebooks + cb];
+                if (cb == 0) {
+                    if (!lookup_single_embedding_row(model_.codec_embd, code, embd_row.data())) {
+                        return false;
+                    }
+                } else {
+                    const int cb_idx = cb - 1;
+                    if (cb_idx >= (int) model_.code_pred_embd.size()
+                        || !model_.code_pred_embd[cb_idx]) continue;
+                    if (!lookup_single_embedding_row(model_.code_pred_embd[cb_idx], code, embd_row.data())) {
+                        return false;
+                    }
+                }
+                for (int32_t h = 0; h < hidden_size; ++h) dst[h] += embd_row[h];
+            }
+            for (int32_t h = 0; h < hidden_size; ++h) dst[h] += tts_pad_embed[h];
+        }
+
+        // Assemble full prefill: [role(3), codec_overlay, ICL_text, ICL_codec].
+        const int32_t prefix_len = 3 + codec_plus_overlay_len;
+        const int32_t prefill_len = prefix_len + text_len + codec_section_len;
+        prefill_embd.resize((size_t) prefill_len * hidden_size);
+
+        memcpy(prefill_embd.data(), role_embed.data(), role_embed.size() * sizeof(float));
+        memcpy(prefill_embd.data() + (size_t) 3 * hidden_size,
+               codec_plus_overlay.data(), codec_plus_overlay.size() * sizeof(float));
+        memcpy(prefill_embd.data() + (size_t) prefix_len * hidden_size,
+               icl_text_section.data(), icl_text_section.size() * sizeof(float));
+        memcpy(prefill_embd.data() + (size_t) (prefix_len + text_len) * hidden_size,
+               icl_codec_section.data(), icl_codec_section.size() * sizeof(float));
+
+        // Trailing is a single tts_pad_embed — the model generates from there.
+        trailing_text_hidden.resize(hidden_size);
+        memcpy(trailing_text_hidden.data(), tts_pad_embed.data(), hidden_size * sizeof(float));
+
+        return true;
+    }
+
+    // --- non-ICL path (existing behavior) ----------------------------------
 
     const int32_t prefill_len = 3 + codec_plus_overlay_len + 1;
     prefill_embd.resize((size_t)prefill_len * hidden_size);
@@ -2680,7 +2828,11 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                int32_t language_id,
                                float repetition_penalty,
                                float temperature,
-                               int32_t top_k) {
+                               int32_t top_k,
+                               const int32_t * ref_text_tokens,
+                               int32_t n_ref_text_tokens,
+                               const int32_t * ref_codes,
+                               int32_t n_ref_frames) {
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};
@@ -2716,7 +2868,9 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     t0 = clk::now();
 #endif
     if (!build_prefill_graph(text_tokens, n_tokens, speaker_embd, language_id,
-                             prefill_embd, trailing_text_hidden, tts_pad_embed)) {
+                             prefill_embd, trailing_text_hidden, tts_pad_embed,
+                             ref_text_tokens, n_ref_text_tokens,
+                             ref_codes, n_ref_frames)) {
         return false;
     }
 #ifdef QWEN3_TTS_TIMING

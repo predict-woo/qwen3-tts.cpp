@@ -283,18 +283,28 @@ public:
                                        float temperature = 0.9f,
                                        int32_t top_k = 50);
     
-    // Generate speech codes autoregressively
-    // text_tokens: input text token IDs [n_tokens]
-    // speaker_embd: speaker embedding [hidden_size]
-    // max_len: maximum number of frames to generate
-    // output: generated speech codes [n_frames, n_codebooks]
+    // Generate speech codes autoregressively.
+    //
+    // text_tokens / n_tokens:       input text tokens (full framing from encode_for_tts)
+    // speaker_embd:                 speaker embedding [hidden_size] (nullptr for pure text)
+    // max_len:                      maximum number of codec frames to generate
+    // output:                       generated speech codes [n_frames * n_codebooks]
+    // ref_text_tokens / n_ref_text: ref transcript tokens (content only, already stripped
+    //                               of framing by the caller). Optional.
+    // ref_codes / n_ref_frames:     reference audio codes from AudioCodecEncoder.
+    //                               Optional. When both ref_text and ref_codes are
+    //                               provided, the prefill switches to ICL layout.
     bool generate(const int32_t * text_tokens, int32_t n_tokens,
                   const float * speaker_embd, int32_t max_len,
                   std::vector<int32_t> & output,
                   int32_t language_id = 2050,
                   float repetition_penalty = 1.05f,
                   float temperature = 0.9f,
-                  int32_t top_k = 50);
+                  int32_t top_k = 50,
+                  const int32_t * ref_text_tokens = nullptr,
+                  int32_t n_ref_text_tokens = 0,
+                  const int32_t * ref_codes = nullptr,
+                  int32_t n_ref_frames = 0);
     
     const tts_transformer_config & get_config() const { return model_.config; }
 
@@ -326,7 +336,11 @@ private:
                              const float * speaker_embd, int32_t language_id,
                              std::vector<float> & prefill_embd,
                              std::vector<float> & trailing_text_hidden,
-                             std::vector<float> & tts_pad_embed);
+                             std::vector<float> & tts_pad_embed,
+                             const int32_t * ref_text_tokens = nullptr,
+                             int32_t n_ref_text_tokens = 0,
+                             const int32_t * ref_codes = nullptr,
+                             int32_t n_ref_frames = 0);
 
     struct ggml_cgraph * build_prefill_forward_graph(int32_t n_tokens, int32_t n_past);
 

@@ -289,17 +289,53 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
     
     int64_t t_encode_start = get_time_ms();
     std::vector<float> speaker_embedding;
-    
+
     if (!audio_encoder_.encode(ref_samples, n_ref_samples, speaker_embedding)) {
         result.error_msg = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
         return result;
     }
     result.t_encode_ms = get_time_ms() - t_encode_start;
-    
+
     if (params.print_progress) {
         fprintf(stderr, "Speaker embedding extracted: %zu floats\n", speaker_embedding.size());
     }
-    
+
+    // ICL mode: also encode reference audio to discrete codec codes and thread
+    // them + the reference transcript into the talker prefill.
+    if (!params.ref_text.empty()) {
+        if (!codec_encoder_loaded_) {
+            if (decoder_model_path_.empty()) {
+                result.error_msg = "Internal error: missing tokenizer model path for codec encoder";
+                return result;
+            }
+            int64_t t_ce_start = get_time_ms();
+            if (!codec_encoder_.load_model(decoder_model_path_)) {
+                result.error_msg = "Failed to load Mimi codec encoder: " + codec_encoder_.get_error();
+                return result;
+            }
+            codec_encoder_loaded_ = true;
+            if (params.print_timing) {
+                fprintf(stderr, "  Codec encoder lazy-loaded in %lld ms\n",
+                        (long long)(get_time_ms() - t_ce_start));
+            }
+        }
+
+        std::vector<int32_t> ref_codes;
+        int32_t n_ref_frames = 0;
+        int64_t t_ce_encode_start = get_time_ms();
+        if (!codec_encoder_.encode(ref_samples, n_ref_samples, ref_codes, n_ref_frames)) {
+            result.error_msg = "Failed to encode reference audio: " + codec_encoder_.get_error();
+            return result;
+        }
+        result.t_encode_ms += get_time_ms() - t_ce_encode_start;
+
+        if (params.print_progress) {
+            fprintf(stderr, "Reference codes: %d frames x 16 codebooks (ICL mode)\n", n_ref_frames);
+        }
+        return synthesize_internal(text, speaker_embedding.data(), params, result,
+                                   ref_codes.data(), n_ref_frames);
+    }
+
     return synthesize_internal(text, speaker_embedding.data(), params, result);
 }
 
@@ -365,7 +401,9 @@ tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
 tts_result Qwen3TTS::synthesize_internal(const std::string & text,
                                           const float * speaker_embedding,
                                           const tts_params & params,
-                                          tts_result & result) {
+                                          tts_result & result,
+                                          const int32_t * ref_codes,
+                                          int32_t n_ref_frames) {
     int64_t t_total_start = get_time_ms();
     auto sample_memory = [&](const char * stage) {
         process_memory_snapshot mem;
@@ -440,11 +478,24 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         transformer_.set_seed((uint32_t)params.seed);
     }
 
+    // ICL mode: tokenize the reference transcript so the talker prefill can
+    // align the new text with the reference codes. We encode with the normal
+    // encode_for_tts framing and let the transformer trim the 8-token wrap.
+    std::vector<int32_t> ref_text_tokens;
+    const bool icl_mode = (ref_codes != nullptr && n_ref_frames > 0 && !params.ref_text.empty());
+    if (icl_mode) {
+        ref_text_tokens = tokenizer_.encode_for_tts(params.ref_text);
+    }
+
     std::vector<int32_t> speech_codes;
     if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
                                speaker_embedding, params.max_audio_tokens, speech_codes,
                                params.language_id, params.repetition_penalty,
-                               params.temperature, params.top_k)) {
+                               params.temperature, params.top_k,
+                               ref_text_tokens.empty() ? nullptr : ref_text_tokens.data(),
+                               (int32_t)ref_text_tokens.size(),
+                               icl_mode ? ref_codes : nullptr,
+                               icl_mode ? n_ref_frames : 0)) {
         result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
         return result;
     }
@@ -489,9 +540,37 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         }
     }
     
-    if (!audio_decoder_.decode(speech_codes.data(), n_frames, result.audio)) {
+    // ICL: prepend the reference codes to the generated codes before vocoder
+    // decode so the decoder has warm context (matches Qwen's Python reference,
+    // qwen3_tts_model.py torch.cat([ref, new])). Without this the vocoder
+    // cold-starts and produces ~350ms of noise at the beginning of the output.
+    // We slice the ref portion off the decoded wav immediately after.
+    std::vector<int32_t> decode_codes_storage;
+    const int32_t * decode_codes_ptr = speech_codes.data();
+    int32_t decode_n_frames = n_frames;
+    if (icl_mode) {
+        decode_n_frames = n_ref_frames + n_frames;
+        decode_codes_storage.resize((size_t) decode_n_frames * n_codebooks);
+        memcpy(decode_codes_storage.data(), ref_codes,
+               (size_t) n_ref_frames * n_codebooks * sizeof(int32_t));
+        memcpy(decode_codes_storage.data() + (size_t) n_ref_frames * n_codebooks,
+               speech_codes.data(), speech_codes.size() * sizeof(int32_t));
+        decode_codes_ptr = decode_codes_storage.data();
+    }
+
+    if (!audio_decoder_.decode(decode_codes_ptr, decode_n_frames, result.audio)) {
         result.error_msg = "Failed to decode speech codes: " + audio_decoder_.get_error();
         return result;
+    }
+
+    // Trim the leading reference portion from the decoded wav.
+    if (icl_mode && !result.audio.empty()) {
+        size_t total = result.audio.size();
+        size_t cut = (size_t) (((int64_t) n_ref_frames * (int64_t) total) / (int64_t) decode_n_frames);
+        if (cut < total) {
+            result.audio.erase(result.audio.begin(),
+                               result.audio.begin() + (ptrdiff_t) cut);
+        }
     }
     result.t_decode_ms = get_time_ms() - t_decode_start;
     sample_memory("synth/after-decode");

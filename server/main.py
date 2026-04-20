@@ -137,6 +137,12 @@ class SpeechRequest(BaseModel):
     response_format: str = "wav"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
 
+    # ICL voice cloning: supply a path to a reference WAV on the server's
+    # filesystem together with its transcript. When both are set, the request
+    # takes the Mimi codec path; `voice` is ignored in that case.
+    reference_audio_path: str | None = None
+    reference_text: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -152,6 +158,28 @@ async def create_speech(request: SpeechRequest):
 
     # Map speed to temperature: speed=1.0 → temp=0.9, speed=2.0 → temp=0.45
     temperature = min(2.0, max(0.1, 0.9 / request.speed))
+
+    # ICL path: both reference_audio_path and reference_text provided.
+    icl_ref_audio = (request.reference_audio_path or "").strip()
+    icl_ref_text  = (request.reference_text or "").strip()
+    if icl_ref_audio and icl_ref_text:
+        if not os.path.isfile(icl_ref_audio):
+            raise HTTPException(status_code=400, detail={"error": {"message": f"reference_audio_path does not exist: {icl_ref_audio}", "type": "invalid_request_error"}})
+        try:
+            def _do_icl():
+                with _synthesis_lock:
+                    return tts_engine.synthesize_icl(
+                        request.input, icl_ref_audio, icl_ref_text,
+                        temperature=temperature,
+                    )
+            loop = asyncio.get_event_loop()
+            samples, sample_rate = await loop.run_in_executor(None, _do_icl)
+            wav_data = pcm_float32_to_wav(samples, sample_rate)
+            return Response(content=wav_data, media_type="audio/wav")
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail={"error": {"message": str(e), "type": "server_error"}})
+    elif icl_ref_audio or icl_ref_text:
+        raise HTTPException(status_code=400, detail={"error": {"message": "reference_audio_path and reference_text must be provided together for ICL mode", "type": "invalid_request_error"}})
 
     voice = request.voice.lower()
 

@@ -97,6 +97,21 @@ Qwen3TtsAudio* qwen3_tts_synthesize_with_embedding(
     int32_t embedding_size,
     const Qwen3TtsParams* params);
 
+/* Synthesize with in-context-learning (ICL) voice cloning.
+ * Encodes the reference audio through the Mimi codec and threads the
+ * resulting codes plus the reference transcript into the talker prefill —
+ * Qwen's intended cloning mode for Base variants.
+ *
+ * reference_audio_path: path to reference WAV (24kHz mono recommended).
+ * reference_text:       transcript of the reference audio (same language).
+ * Returns NULL on failure. Caller must free with qwen3_tts_free_audio(). */
+Qwen3TtsAudio* qwen3_tts_synthesize_icl_file(
+    Qwen3Tts* tts,
+    const char* text,
+    const char* reference_audio_path,
+    const char* reference_text,
+    const Qwen3TtsParams* params);
+
 /* Get last error message (or empty string) */
 const char* qwen3_tts_get_error(const Qwen3Tts* tts);
 

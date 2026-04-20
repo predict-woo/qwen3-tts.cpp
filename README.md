@@ -307,6 +307,7 @@ Place both `.gguf` files in a `models/` directory.
 | `--dump-speaker-embedding <file>` | Save extracted embedding from `--reference` | (none) |
 | `--speaker <name>` | Use a named preset voice (CustomVoice / VoiceDesign models) | (none) |
 | `--list-speakers` | Print the preset voices baked into the loaded model and exit | — |
+| `--ref-text <text>` | Reference transcript (combined with `-r`) → ICL voice cloning | (none) |
 | `-i, --instruction, --instruct <text>` | Voice steering instruction (e.g. "Speak happily") | (none) |
 | `--temperature <val>` | Sampling temperature (0 = greedy) | 0.9 |
 | `--top-k <n>` | Top-k sampling (0 = disabled) | 50 |
@@ -317,6 +318,38 @@ Place both `.gguf` files in a `models/` directory.
 | `--no-f32-acc` | Disable f32 matmul accumulation (faster, less precise) | (off) |
 | `-l, --language <lang>` | Language: en, ru, zh, ja, ko, de, fr, es | en |
 | `-j, --threads <n>` | Number of compute threads | 4 |
+
+### ICL Voice Cloning (Base models)
+
+For `Qwen3-TTS-12Hz-*-Base` checkpoints, Qwen's documented cloning mode is
+**in-context learning (ICL)** — you provide a reference WAV *and its transcript*,
+and the pipeline encodes the audio through the Mimi codec, then threads both
+the codes and the transcript into the talker prefill. This is different from
+our legacy x-vector (ECAPA-TDNN) cloning, which only sees a 1024-dim speaker
+embedding. ICL typically produces tighter, better-matched clones on Base
+models at the cost of a short encode pass over the reference audio.
+
+```bash
+./build/qwen3-tts-cli -m models \
+  --tts-model qwen3-tts-1.7b-f16.gguf \
+  -r examples/readme_clone_input.wav \
+  --ref-text "This is a sample recording of a human voice reading text into a microphone." \
+  -t "Hello, this is an ICL voice clone." \
+  -o out.wav
+```
+
+When `--ref-text` is omitted, `-r` falls back to the x-vector path. ICL cannot
+currently be combined with `--instruction`.
+
+In the Python server, supply `reference_audio_path` + `reference_text` in the
+`/v1/audio/speech` request body to route a single request through ICL:
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"input":"Hello","reference_audio_path":"/path/to/ref.wav","reference_text":"the transcript."}' \
+  -o out.wav
+```
 
 ### Preset Voices (CustomVoice / VoiceDesign)
 

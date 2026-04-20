@@ -3,6 +3,7 @@
 #include "tokenizer/text_tokenizer.h"
 #include "transformer/tts_transformer.h"
 #include "encoder/audio_tokenizer_encoder.h"
+#include "encoder/audio_codec_encoder.h"
 #include "decoder/audio_tokenizer_decoder.h"
 
 #include <string>
@@ -49,6 +50,14 @@ struct tts_params {
 
     // Voice steering instruction (e.g. "Speak happily", "Use a deep voice")
     std::string instruction;
+
+    // Reference transcript for ICL voice cloning. When non-empty alongside a
+    // reference audio source (`-r` / `synthesize_with_voice`), the pipeline
+    // encodes the reference audio with the Mimi codec and threads both the
+    // codes and the transcript into the talker prefill (Qwen's intended
+    // cloning mode for Base variants). If empty, voice cloning falls back to
+    // x-vector-only conditioning.
+    std::string ref_text;
 };
 
 // TTS generation result
@@ -170,15 +179,19 @@ private:
     tts_result synthesize_internal(const std::string & text,
                                    const float * speaker_embedding,
                                    const tts_params & params,
-                                   tts_result & result);
-    
+                                   tts_result & result,
+                                   const int32_t * ref_codes = nullptr,
+                                   int32_t n_ref_frames = 0);
+
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;
     AudioTokenizerEncoder audio_encoder_;
+    AudioCodecEncoder codec_encoder_;
     AudioTokenizerDecoder audio_decoder_;
     
     bool models_loaded_ = false;
     bool encoder_loaded_ = false;
+    bool codec_encoder_loaded_ = false;
     bool transformer_loaded_ = false;
     bool decoder_loaded_ = false;
     bool low_mem_mode_ = false;

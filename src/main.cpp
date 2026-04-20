@@ -28,6 +28,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  -i, --instruction <text>  Voice steering instruction (e.g. \"Speak happily\")\n");
     fprintf(stderr, "  --speaker <name>       Use a built-in preset voice (CustomVoice models only)\n");
     fprintf(stderr, "  --list-speakers        List preset voices available in the loaded model and exit\n");
+    fprintf(stderr, "  --ref-text <text>      Reference transcript (with -r) for ICL voice cloning\n");
     fprintf(stderr, "  -l, --language <lang>  Language: en,ru,zh,ja,ko,de,fr,es (default: en)\n");
     fprintf(stderr, "  -j, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  -h, --help             Show this help\n");
@@ -55,6 +56,7 @@ int main(int argc, char ** argv) {
     std::string dump_speaker_embedding_file;
     std::string speaker_preset;
     bool list_speakers = false;
+    std::string ref_text;
     
     qwen3_tts::tts_params params;
     
@@ -121,6 +123,12 @@ int main(int argc, char ** argv) {
             speaker_preset = argv[i];
         } else if (arg == "--list-speakers") {
             list_speakers = true;
+        } else if (arg == "--ref-text") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing ref-text value\n");
+                return 1;
+            }
+            ref_text = argv[i];
         } else if (arg == "--temperature") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing temperature value\n");
@@ -210,7 +218,22 @@ int main(int argc, char ** argv) {
         print_usage(argv[0]);
         return 1;
     }
-    
+
+    // Wire --ref-text through to the synth params; the pipeline routes voice
+    // cloning through the Mimi ICL path only when both -r and --ref-text are
+    // provided.
+    if (!ref_text.empty()) {
+        if (reference_audio.empty()) {
+            fprintf(stderr, "Error: --ref-text requires -r/--reference\n");
+            return 1;
+        }
+        if (!params.instruction.empty()) {
+            fprintf(stderr, "Error: --ref-text cannot be combined with --instruction yet\n");
+            return 1;
+        }
+        params.ref_text = ref_text;
+    }
+
     // Initialize TTS
     qwen3_tts::Qwen3TTS tts;
     

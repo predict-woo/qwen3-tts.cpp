@@ -112,6 +112,13 @@ def _load_library() -> ctypes.CDLL:
     ]
     lib.qwen3_tts_synthesize_with_embedding.restype = ctypes.POINTER(Qwen3TtsAudio)
 
+    # -- qwen3_tts_synthesize_icl_file --
+    lib.qwen3_tts_synthesize_icl_file.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+        ctypes.POINTER(Qwen3TtsParams),
+    ]
+    lib.qwen3_tts_synthesize_icl_file.restype = ctypes.POINTER(Qwen3TtsAudio)
+
     # -- qwen3_tts_sample_rate --
     lib.qwen3_tts_sample_rate.argtypes = [ctypes.c_void_p]
     lib.qwen3_tts_sample_rate.restype = ctypes.c_int32
@@ -284,6 +291,35 @@ class QwenTTS:
         """Synthesize using a built-in preset voice by name."""
         embedding = self.get_speaker_embedding(speaker)
         return self.synthesize_with_embedding(text, embedding, **synthesize_kwargs)
+
+    def synthesize_icl(
+        self,
+        text: str,
+        reference_audio_path: str,
+        reference_text: str,
+        temperature: float = 0.9,
+        top_k: int = 50,
+        language_id: int = 2050,
+        max_audio_tokens: int = 2048,
+        repetition_penalty: float = 1.05,
+    ) -> tuple[list[float], int]:
+        """Synthesize with in-context-learning voice cloning.
+
+        Encodes the reference audio with the Mimi codec and threads the
+        resulting codes plus the transcript into the talker prefill.
+        Intended cloning mode for Qwen3-TTS Base variants.
+        """
+        params = self._make_params(
+            temperature=temperature, top_k=top_k, language_id=language_id,
+            max_audio_tokens=max_audio_tokens, repetition_penalty=repetition_penalty,
+        )
+        audio_ptr = self._lib.qwen3_tts_synthesize_icl_file(
+            self._handle, text.encode("utf-8"),
+            reference_audio_path.encode("utf-8"),
+            reference_text.encode("utf-8"),
+            ctypes.byref(params),
+        )
+        return self._extract_audio(audio_ptr)
 
     def close(self):
         """Destroy the engine and release resources."""
