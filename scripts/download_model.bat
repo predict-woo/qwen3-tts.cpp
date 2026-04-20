@@ -48,6 +48,9 @@ exit /b 0
 :fail
 echo.
 echo error: download failed 1>&2
+rem Pause so users who double-clicked from Explorer can read the error before
+rem the cmd window closes. Skipped when CI=1 is set or stdin is not a tty.
+if not defined CI pause
 endlocal
 exit /b 1
 
