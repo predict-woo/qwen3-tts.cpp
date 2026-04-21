@@ -32,7 +32,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, backend: cpu, name: linux-cpu }
+          - { os: ubuntu-latest, backend: cpu,    name: linux-cpu }
+          - { os: ubuntu-latest, backend: vulkan, name: linux-vulkan }
+          - { os: ubuntu-latest, backend: cuda,   name: linux-cuda }
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.compute-version.outputs.version }}
@@ -44,6 +46,38 @@ jobs:
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential zip
+
+      - name: Install Vulkan SDK (Linux)
+        if: runner.os == 'Linux' && matrix.backend == 'vulkan'
+        run: |
+          set -e
+          . /etc/os-release
+          echo "Ubuntu codename: $UBUNTU_CODENAME"
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ ${UBUNTU_CODENAME}-backports main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
+          if sudo apt-get update && sudo apt-get install -y vulkan-sdk glslc libvulkan1 vulkan-tools; then
+            echo "Vulkan SDK installed via apt"
+          else
+            echo "apt install failed; falling back to tarball SDK"
+            sudo rm -f /etc/apt/sources.list.d/lunarg-vulkan.list
+            sudo apt-get update || true
+            sudo apt-get install -y libvulkan1 vulkan-tools glslang-tools
+            mkdir -p "$HOME/vulkan-sdk"
+            wget -qO /tmp/vulkan-sdk.tar.xz https://sdk.lunarg.com/sdk/download/latest/linux/vulkansdk-linux-x86_64.tar.xz
+            tar -xJf /tmp/vulkan-sdk.tar.xz -C "$HOME/vulkan-sdk" --strip-components=1
+            SDK_VER=$(ls "$HOME/vulkan-sdk" | head -1)
+            echo "VULKAN_SDK=$HOME/vulkan-sdk/$SDK_VER/x86_64" >> "$GITHUB_ENV"
+            echo "$HOME/vulkan-sdk/$SDK_VER/x86_64/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Install CUDA Toolkit
+        if: matrix.backend == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust"]'
+          linux-local-args: '["--toolkit"]'
 
       - name: Configure ggml
         shell: bash
@@ -72,6 +106,20 @@ jobs:
       - name: Build project
         run: cmake --build build --config Release -j --target qwen3-tts-cli qwen3-tts-quantize
 
+      - name: Bundle CUDA runtime libs (Linux)
+        if: runner.os == 'Linux' && matrix.backend == 'cuda'
+        shell: bash
+        run: |
+          mkdir -p cuda-runtime
+          for lib in libcudart.so libcublas.so libcublasLt.so; do
+            # Follow the versioned symlink chain and copy the concrete .so
+            for f in /usr/local/cuda/lib64/${lib}*; do
+              [ -e "$f" ] || continue
+              cp -P "$f" cuda-runtime/ || true
+            done
+          done
+          ls -la cuda-runtime/
+
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
@@ -82,6 +130,10 @@ jobs:
           cp build/qwen3-tts-quantize "dist/$PKG/"
           # GGML runtime shared libs (if any — static build produces none)
           find ggml/build -maxdepth 4 \( -name 'libggml*.so*' -o -name 'libggml*.dylib' \) -exec cp {} "dist/$PKG/" \; || true
+          # CUDA runtime libs staged in previous step (CUDA builds only)
+          if [ -d cuda-runtime ] && [ "${{ matrix.backend }}" = "cuda" ]; then
+            cp -P cuda-runtime/* "dist/$PKG/" || true
+          fi
           cp examples/*.wav                  "dist/$PKG/examples/"
           cp scripts/download_model.sh       "dist/$PKG/scripts/"
           cp scripts/download_model.bat      "dist/$PKG/scripts/"
