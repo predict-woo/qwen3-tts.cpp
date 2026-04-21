@@ -32,9 +32,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, backend: cpu,    name: linux-cpu }
-          - { os: ubuntu-latest, backend: vulkan, name: linux-vulkan }
-          - { os: ubuntu-latest, backend: cuda,   name: linux-cuda }
+          # Linux builds pinned to 22.04 (jammy) for glibc 2.35 floor + LunarG apt availability.
+          - { os: ubuntu-22.04, backend: cpu,    name: linux-cpu }
+          - { os: ubuntu-22.04, backend: vulkan, name: linux-vulkan }
+          - { os: ubuntu-22.04, backend: cuda,   name: linux-cuda }
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.compute-version.outputs.version }}
@@ -47,22 +48,26 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential zip
 
-      - name: Install Vulkan SDK
-        if: matrix.backend == 'vulkan'
-        uses: humbletim/install-vulkan-sdk@v1.1.1
-        with:
-          version: 1.3.290.0
-          cache: true
+      - name: Install Vulkan SDK (Linux)
+        if: runner.os == 'Linux' && matrix.backend == 'vulkan'
+        run: |
+          set -e
+          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ jammy main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
 
-      - name: Install CUDA Toolkit
-        if: matrix.backend == 'cuda'
-        uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.0'
-          method: 'local'
-          linux-local-args: '["--toolkit"]'
-          use-github-cache: false
-          use-local-cache: false
+      - name: Install CUDA Toolkit (Linux)
+        if: runner.os == 'Linux' && matrix.backend == 'cuda'
+        run: |
+          set -e
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-5
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+          echo "CUDA_PATH=/usr/local/cuda" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Configure ggml
         shell: bash
