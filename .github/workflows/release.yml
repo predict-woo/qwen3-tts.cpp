@@ -36,6 +36,10 @@ jobs:
           - { os: ubuntu-22.04, backend: cpu,    name: linux-cpu }
           - { os: ubuntu-22.04, backend: vulkan, name: linux-vulkan }
           - { os: ubuntu-22.04, backend: cuda,   name: linux-cuda }
+          # Windows builds use windows-2022 (explicit) for reproducibility.
+          - { os: windows-2022, backend: cpu,    name: windows-cpu }
+          - { os: windows-2022, backend: vulkan, name: windows-vulkan }
+          - { os: windows-2022, backend: cuda,   name: windows-cuda }
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.compute-version.outputs.version }}
@@ -76,6 +80,57 @@ jobs:
           sudo ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
           echo "LDFLAGS=-Wl,-rpath-link,/usr/local/cuda/lib64/stubs -L/usr/local/cuda/lib64/stubs" >> "$GITHUB_ENV"
 
+      - name: Install build tools (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # windows-2022 already has MSVC 17.x + CMake + PowerShell on PATH.
+          # Sanity-check that they work; fail fast if the image changed.
+          cmake --version
+          cl.exe /? 2>&1 | head -1 || true
+
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows' && matrix.backend == 'vulkan'
+        shell: pwsh
+        run: |
+          $version = "1.3.290.0"
+          $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
+          $installer = "$env:RUNNER_TEMP\VulkanSDK-Installer.exe"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          Write-Host "Running silent install"
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses","--default-answer","--confirm-command","install" -Wait -NoNewWindow
+          $sdkRoot = "C:\VulkanSDK\$version"
+          if (-not (Test-Path $sdkRoot)) { Write-Error "SDK install dir not found: $sdkRoot"; exit 1 }
+          echo "VULKAN_SDK=$sdkRoot" >> $env:GITHUB_ENV
+          echo "$sdkRoot\Bin" >> $env:GITHUB_PATH
+          Write-Host "Installed Vulkan SDK at $sdkRoot"
+
+      - name: Install CUDA Toolkit (Windows)
+        if: runner.os == 'Windows' && matrix.backend == 'cuda'
+        shell: pwsh
+        run: |
+          $version = "12.5.0"
+          $installer = "$env:RUNNER_TEMP\cuda_installer.exe"
+          $url = "https://developer.download.nvidia.com/compute/cuda/12.5.0/network_installers/cuda_12.5.0_windows_network.exe"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          Write-Host "Running silent install (this takes ~5 min)"
+          # Silent switches: -s (silent), then subpackage list without versions (the installer infers)
+          $args = @("-s","nvcc_12.5","cudart_12.5","cublas_12.5","cublas_dev_12.5","thrust_12.5","visual_studio_integration_12.5")
+          $proc = Start-Process -FilePath $installer -ArgumentList $args -Wait -PassThru -NoNewWindow
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "CUDA installer exited $($proc.ExitCode)"
+            exit $proc.ExitCode
+          }
+          $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.5"
+          if (-not (Test-Path $cudaRoot)) { Write-Error "CUDA not installed at expected path"; exit 1 }
+          echo "CUDA_PATH=$cudaRoot" >> $env:GITHUB_ENV
+          echo "CUDA_PATH_V12_5=$cudaRoot" >> $env:GITHUB_ENV
+          echo "$cudaRoot\bin" >> $env:GITHUB_PATH
+          echo "$cudaRoot\libnvvp" >> $env:GITHUB_PATH
+          Write-Host "Installed CUDA at $cudaRoot"
+
       - name: Configure ggml
         shell: bash
         run: |
@@ -86,7 +141,11 @@ jobs:
             cuda)   FLAGS="$FLAGS -DGGML_CUDA=ON" ;;
             metal)  FLAGS="$FLAGS -DGGML_METAL=ON" ;;
           esac
-          cmake -S ggml -B ggml/build $FLAGS
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cmake -S ggml -B ggml/build -G "Visual Studio 17 2022" -A x64 $FLAGS
+          else
+            cmake -S ggml -B ggml/build $FLAGS
+          fi
 
       - name: Build ggml
         shell: bash
@@ -106,7 +165,11 @@ jobs:
           if [ "${{ runner.os }}" != "macOS" ]; then
             FLAGS="$FLAGS -DQWEN3_TTS_COREML=OFF"
           fi
-          cmake -S . -B build $FLAGS
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cmake -S . -B build -G "Visual Studio 17 2022" -A x64 $FLAGS
+          else
+            cmake -S . -B build $FLAGS
+          fi
 
       - name: Build project
         run: cmake --build build --config Release -j --target qwen3-tts-cli qwen3-tts-quantize
@@ -153,6 +216,38 @@ jobs:
           chmod +x "dist/$PKG/qwen3-tts-cli" "dist/$PKG/qwen3-tts-quantize"
           cd dist && zip -r "${PKG}.zip" "$PKG"
           ls -la "${PKG}.zip"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          PKG="qwen3-tts-${VERSION}-${{ matrix.name }}"
+          mkdir -p "dist/$PKG/examples" "dist/$PKG/scripts"
+          cp build/Release/qwen3-tts-cli.exe      "dist/$PKG/"
+          cp build/Release/qwen3-tts-quantize.exe "dist/$PKG/"
+          # GGML runtime DLLs (ggml.dll, ggml-base.dll, ggml-cpu.dll, plus backend if applicable)
+          find ggml/build -maxdepth 5 -name 'ggml*.dll' -exec cp {} "dist/$PKG/" \; || true
+          # CUDA runtime DLLs (windows-specific filenames)
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            for pat in "cudart64_*.dll" "cublas64_*.dll" "cublasLt64_*.dll"; do
+              find "$CUDA_PATH/bin" -maxdepth 1 -name "$pat" -exec cp {} "dist/$PKG/" \; 2>/dev/null || true
+            done
+          fi
+          # Vulkan loader DLL — usually on PATH via system, but bundle it so end users
+          # without the SDK installed can still run. Located at $VULKAN_SDK\Bin\vulkan-1.dll.
+          if [ "${{ matrix.backend }}" = "vulkan" ]; then
+            if [ -f "$VULKAN_SDK/Bin/vulkan-1.dll" ]; then
+              cp "$VULKAN_SDK/Bin/vulkan-1.dll" "dist/$PKG/"
+            fi
+          fi
+          cp examples/*.wav                  "dist/$PKG/examples/"
+          cp scripts/download_model.sh       "dist/$PKG/scripts/"
+          cp scripts/download_model.bat      "dist/$PKG/scripts/"
+          cp .github/packaging/README.txt    "dist/$PKG/"
+          cp LICENSE                         "dist/$PKG/"
+          # Use PowerShell's Compress-Archive (reliable on windows-2022, no zip.exe)
+          powershell -Command "Compress-Archive -Path 'dist/$PKG/*' -DestinationPath 'dist/${PKG}.zip' -CompressionLevel Optimal"
+          ls -la "dist/${PKG}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
