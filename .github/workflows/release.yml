@@ -116,12 +116,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p cuda-runtime
-          for lib in libcudart.so libcublas.so libcublasLt.so; do
-            # Follow the versioned symlink chain and copy the concrete .so
-            for f in /usr/local/cuda/lib64/${lib}*; do
-              [ -e "$f" ] || continue
-              cp -P "$f" cuda-runtime/ || true
-            done
+          # Resolve each SONAME to its concrete file and copy just once under
+          # the SONAME. The binary's DT_NEEDED references libfoo.so.12 (SONAME),
+          # so that's the only name we need to ship. Skipping the unversioned
+          # symlink (dev-only) and the full-version file avoids ~1 GB duplication.
+          for soname in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
+            real="$(readlink -f /usr/local/cuda/lib64/$soname)"
+            if [ -f "$real" ]; then
+              cp "$real" "cuda-runtime/$soname"
+            else
+              echo "warn: $soname not found" >&2
+            fi
           done
           ls -la cuda-runtime/
 
