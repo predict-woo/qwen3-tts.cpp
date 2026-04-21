@@ -47,37 +47,22 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential zip
 
-      - name: Install Vulkan SDK (Linux)
-        if: runner.os == 'Linux' && matrix.backend == 'vulkan'
-        run: |
-          set -e
-          . /etc/os-release
-          echo "Ubuntu codename: $UBUNTU_CODENAME"
-          wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo gpg --dearmor -o /usr/share/keyrings/lunarg.gpg
-          echo "deb [signed-by=/usr/share/keyrings/lunarg.gpg] https://packages.lunarg.com/vulkan/ ${UBUNTU_CODENAME}-backports main" | sudo tee /etc/apt/sources.list.d/lunarg-vulkan.list
-          if sudo apt-get update && sudo apt-get install -y vulkan-sdk glslc libvulkan1 vulkan-tools; then
-            echo "Vulkan SDK installed via apt"
-          else
-            echo "apt install failed; falling back to tarball SDK"
-            sudo rm -f /etc/apt/sources.list.d/lunarg-vulkan.list
-            sudo apt-get update || true
-            sudo apt-get install -y libvulkan1 vulkan-tools glslang-tools
-            mkdir -p "$HOME/vulkan-sdk"
-            wget -qO /tmp/vulkan-sdk.tar.xz https://sdk.lunarg.com/sdk/download/latest/linux/vulkansdk-linux-x86_64.tar.xz
-            tar -xJf /tmp/vulkan-sdk.tar.xz -C "$HOME/vulkan-sdk" --strip-components=1
-            SDK_VER=$(ls "$HOME/vulkan-sdk" | head -1)
-            echo "VULKAN_SDK=$HOME/vulkan-sdk/$SDK_VER/x86_64" >> "$GITHUB_ENV"
-            echo "$HOME/vulkan-sdk/$SDK_VER/x86_64/bin" >> "$GITHUB_PATH"
-          fi
+      - name: Install Vulkan SDK
+        if: matrix.backend == 'vulkan'
+        uses: humbletim/install-vulkan-sdk@v1.1.1
+        with:
+          version: 1.3.290.0
+          cache: true
 
       - name: Install CUDA Toolkit
         if: matrix.backend == 'cuda'
         uses: Jimver/cuda-toolkit@v0.2.19
         with:
           cuda: '12.5.0'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust"]'
+          method: 'local'
           linux-local-args: '["--toolkit"]'
+          use-github-cache: false
+          use-local-cache: false
 
       - name: Configure ggml
         shell: bash
