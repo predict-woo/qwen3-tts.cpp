@@ -82,7 +82,15 @@ jobs:
           cmake -S ggml -B ggml/build $FLAGS
 
       - name: Build ggml
-        run: cmake --build ggml/build --config Release -j
+        shell: bash
+        run: |
+          # CUDA nvcc is memory-heavy (~3 GB/process) — cap parallelism on the
+          # 7 GB GitHub runner to avoid OOM kills.
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            cmake --build ggml/build --config Release -j2
+          else
+            cmake --build ggml/build --config Release -j
+          fi
 
       - name: Configure project
         shell: bash
