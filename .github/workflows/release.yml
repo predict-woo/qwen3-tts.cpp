@@ -40,6 +40,8 @@ jobs:
           - { os: windows-2022, backend: cpu,    name: windows-cpu }
           - { os: windows-2022, backend: vulkan, name: windows-vulkan }
           - { os: windows-2022, backend: cuda,   name: windows-cuda }
+          # macOS arm64 with Metal backend (CoreML code predictor also on).
+          - { os: macos-14,     backend: metal,  name: macos-arm64-metal }
     runs-on: ${{ matrix.os }}
     env:
       VERSION: ${{ needs.compute-version.outputs.version }}
@@ -214,6 +216,17 @@ jobs:
           cp LICENSE                         "dist/$PKG/"
           chmod +x "dist/$PKG/scripts/download_model.sh"
           chmod +x "dist/$PKG/qwen3-tts-cli" "dist/$PKG/qwen3-tts-quantize"
+          # macOS: rewrite dylib IDs and add @executable_path to the binary rpath so
+          # the bundled .dylib files are found from any install location.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            for dylib in "dist/$PKG/"*.dylib; do
+              [ -e "$dylib" ] || continue
+              install_name_tool -id "@rpath/$(basename "$dylib")" "$dylib" || true
+            done
+            for bin in qwen3-tts-cli qwen3-tts-quantize; do
+              install_name_tool -add_rpath "@executable_path" "dist/$PKG/$bin" 2>/dev/null || true
+            done
+          fi
           cd dist && zip -r "${PKG}.zip" "$PKG"
           ls -la "${PKG}.zip"
 
