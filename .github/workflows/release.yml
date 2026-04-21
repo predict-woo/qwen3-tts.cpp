@@ -68,10 +68,13 @@ jobs:
           echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
           echo "CUDA_PATH=/usr/local/cuda" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-          # Expose libcuda.so stub for link-time resolution of Driver API symbols
-          # (cuMem*, etc.). The actual libcuda.so.1 comes from the NVIDIA driver
-          # on the end user's machine at runtime.
-          echo "LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          # libggml-cuda.so has a NEEDED entry for libcuda.so.1 (Driver API).
+          # The toolkit ships only libcuda.so (no .1 suffix) in its stubs dir,
+          # so add a symlink with the expected SONAME and pass rpath-link to ld
+          # so transitive shared-lib checks succeed. At runtime, libcuda.so.1
+          # resolves from the end user's NVIDIA driver install.
+          sudo ln -sf /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+          echo "LDFLAGS=-Wl,-rpath-link,/usr/local/cuda/lib64/stubs -L/usr/local/cuda/lib64/stubs" >> "$GITHUB_ENV"
 
       - name: Configure ggml
         shell: bash
