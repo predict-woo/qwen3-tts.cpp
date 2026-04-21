@@ -101,7 +101,9 @@ int main(int argc, char ** argv) {
 
     // Open input GGUF
     struct ggml_context * meta_ctx = nullptr;
-    struct gguf_init_params gguf_params = { .no_alloc = false, .ctx = &meta_ctx };
+    struct gguf_init_params gguf_params = {};
+    gguf_params.no_alloc = false;
+    gguf_params.ctx = &meta_ctx;
     struct gguf_context * ctx = gguf_init_from_file(params.input_path.c_str(), gguf_params);
     if (!ctx) {
         fprintf(stderr, "Error: failed to open '%s'\n", params.input_path.c_str());
@@ -171,7 +173,10 @@ int main(int argc, char ** argv) {
 
             // Create quantized tensor
             size_t ctx_size = ggml_tensor_overhead() + qbytes + 64;
-            struct ggml_init_params init_params = { .mem_size = ctx_size, .mem_buffer = nullptr, .no_alloc = false };
+            struct ggml_init_params init_params = {};
+            init_params.mem_size = ctx_size;
+            init_params.mem_buffer = nullptr;
+            init_params.no_alloc = false;
             struct ggml_context * tmp_ctx = ggml_init(init_params);
             struct ggml_tensor * q_tensor = ggml_new_tensor(tmp_ctx, params.target_type, n_dims, tensor->ne);
             ggml_set_name(q_tensor, name);
