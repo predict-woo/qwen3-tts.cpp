@@ -12,14 +12,16 @@ rem Filenames are kept verbatim from HuggingFace; pass them explicitly to the
 rem CLI via --tts-model / --tokenizer-model (auto-detection uses different
 rem filenames).
 
-setlocal
+setlocal enabledelayedexpansion
 
 set "DEST_DIR=%~1"
 if "%DEST_DIR%"=="" set "DEST_DIR=.\models"
 
 set "BASE_URL=https://huggingface.co/OpenVoiceOS/qwen3-tts-0.6b-q8-0/resolve/main"
 set "FILE1=qwen3-tts-0.6b-q8-0.gguf"
+set "SHA1=11486718b76d5d7fa1d1c6b03c3afac03f7736c53c3acc3d2903db6925f9ca71"
 set "FILE2=qwen3-tts-tokenizer-0.6b-q8-0.gguf"
+set "SHA2=f03d490a06d038212d99464ae9a6c2fc3327e34c8a4b840d9e8e6ca67bccaf72"
 
 if not exist "%DEST_DIR%" (
     echo [mkdir] %DEST_DIR%
@@ -31,10 +33,10 @@ if not exist "%DEST_DIR%" (
     )
 )
 
-call :download_one "%BASE_URL%/%FILE1%" "%DEST_DIR%\%FILE1%"
+call :download_one "%BASE_URL%/%FILE1%" "%DEST_DIR%\%FILE1%" "%SHA1%"
 if errorlevel 1 goto :fail
 
-call :download_one "%BASE_URL%/%FILE2%" "%DEST_DIR%\%FILE2%"
+call :download_one "%BASE_URL%/%FILE2%" "%DEST_DIR%\%FILE2%" "%SHA2%"
 if errorlevel 1 goto :fail
 
 echo.
@@ -55,18 +57,21 @@ endlocal
 exit /b 1
 
 rem ---------------------------------------------------------------------------
-rem :download_one URL OUT
-rem   Downloads URL to OUT via PowerShell's Invoke-WebRequest.
-rem   Skips if OUT already exists. Writes to OUT.part, renames on success,
+rem :download_one URL OUT EXPECTED_SHA256
+rem   Downloads URL to OUT via PowerShell's Invoke-WebRequest, then verifies
+rem   sha256 against EXPECTED_SHA256. Skips download if OUT already exists but
+rem   still verifies the checksum. Writes to OUT.part, renames on success,
 rem   removes OUT.part on failure so re-runs don't silently skip a corrupt result.
 rem ---------------------------------------------------------------------------
 :download_one
 set "URL=%~1"
 set "OUT=%~2"
+set "EXPECTED_SHA=%~3"
 
 if exist "%OUT%" (
     echo [skip] %OUT% already exists
-    exit /b 0
+    call :verify_sha "%OUT%" "%EXPECTED_SHA%"
+    exit /b %errorlevel%
 )
 
 echo [download] %URL%
@@ -95,4 +100,29 @@ if errorlevel 1 (
 )
 
 echo [ok] %OUT%
+
+call :verify_sha "%OUT%" "%EXPECTED_SHA%"
+if errorlevel 1 (
+    echo error: checksum mismatch, removing corrupt download 1>&2
+    del /f /q "%OUT%"
+    exit /b 1
+)
 exit /b 0
+
+rem ---------------------------------------------------------------------------
+rem :verify_sha FILE EXPECTED_SHA256
+rem   Computes sha256 via PowerShell Get-FileHash and compares to EXPECTED_SHA256.
+rem ---------------------------------------------------------------------------
+:verify_sha
+set "V_FILE=%~1"
+set "V_EXPECTED=%~2"
+for /f "delims=" %%H in ('powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '%V_FILE%').Hash.ToLower()"') do set "V_ACTUAL=%%H"
+if /i "!V_ACTUAL!"=="!V_EXPECTED!" (
+    echo [verified] sha256 ok ^(!V_FILE!^)
+    exit /b 0
+) else (
+    echo [error] checksum mismatch for !V_FILE! 1>&2
+    echo         expected: !V_EXPECTED! 1>&2
+    echo         actual:   !V_ACTUAL! 1>&2
+    exit /b 1
+)

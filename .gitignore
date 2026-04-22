@@ -9,6 +9,10 @@ build/
 models/*.gguf
 models/Qwen3-TTS-*/
 models/coreml/
+models/hf/
+
+# Claude Code runtime state
+.claude/
 
 # Reference outputs (generated)
 reference/*.bin

@@ -2,8 +2,7 @@ name: Release builds
 
 on:
   push:
-    # ci/release-builds is included during Task 4 validation; remove before merging to main.
-    branches: [main, ci/release-builds]
+    branches: [main]
     tags: ['v*']
   workflow_dispatch:
 
@@ -46,7 +45,7 @@ jobs:
     env:
       VERSION: ${{ needs.compute-version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -216,18 +215,48 @@ jobs:
           cp LICENSE                         "dist/$PKG/"
           chmod +x "dist/$PKG/scripts/download_model.sh"
           chmod +x "dist/$PKG/qwen3-tts-cli" "dist/$PKG/qwen3-tts-quantize"
+          # Dedupe GGML lib chains: same content, multiple names. GGML's build
+          # produces 3 real files (libfoo.so[.X[.Y.Z]]) instead of symlink chains;
+          # collapse them so only the longest-named file stays as a real file and
+          # the rest become symlinks. Saves ~200 MB on CUDA zips.
+          python3 - "dist/$PKG" <<'PY'
+          import hashlib, os, sys, glob
+          pkg = sys.argv[1]
+          os.chdir(pkg)
+          groups = {}
+          for f in sorted(glob.glob("lib*.so*") + glob.glob("lib*.dylib") + glob.glob("lib*.*.dylib")):
+              if os.path.isfile(f) and not os.path.islink(f):
+                  with open(f, "rb") as fh:
+                      h = hashlib.sha256(fh.read()).hexdigest()
+                  groups.setdefault(h, []).append(f)
+          saved = 0
+          for h, files in groups.items():
+              if len(files) < 2:
+                  continue
+              files.sort(key=len, reverse=True)
+              real, others = files[0], files[1:]
+              for other in others:
+                  size = os.path.getsize(other)
+                  os.unlink(other)
+                  os.symlink(real, other)
+                  saved += size
+                  print(f"  symlinked {other} -> {real}")
+          print(f"  saved {saved} bytes")
+          PY
           # macOS: rewrite dylib IDs and add @executable_path to the binary rpath so
           # the bundled .dylib files are found from any install location.
           if [ "${{ runner.os }}" = "macOS" ]; then
             for dylib in "dist/$PKG/"*.dylib; do
               [ -e "$dylib" ] || continue
+              [ -L "$dylib" ] && continue   # dedupe may have replaced some with symlinks
               install_name_tool -id "@rpath/$(basename "$dylib")" "$dylib" || true
             done
             for bin in qwen3-tts-cli qwen3-tts-quantize; do
               install_name_tool -add_rpath "@executable_path" "dist/$PKG/$bin" 2>/dev/null || true
             done
           fi
-          cd dist && zip -r "${PKG}.zip" "$PKG"
+          # -y preserves symlinks (without it, zip follows and stores duplicates)
+          cd dist && zip -y -r "${PKG}.zip" "$PKG"
           ls -la "${PKG}.zip"
 
       - name: Package (Windows)
@@ -263,7 +292,7 @@ jobs:
           ls -la "dist/${PKG}.zip"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: qwen3-tts-${{ env.VERSION }}-${{ matrix.name }}
           path: dist/qwen3-tts-${{ env.VERSION }}-${{ matrix.name }}.zip
@@ -278,7 +307,7 @@ jobs:
       contents: write
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: all-artifacts
           pattern: 'qwen3-tts-*'
