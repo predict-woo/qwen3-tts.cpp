@@ -224,11 +224,25 @@ jobs:
           pkg = sys.argv[1]
           os.chdir(pkg)
           groups = {}
-          for f in sorted(glob.glob("lib*.so*") + glob.glob("lib*.dylib") + glob.glob("lib*.*.dylib")):
-              if os.path.isfile(f) and not os.path.islink(f):
+          for f in sorted(set(glob.glob("lib*.so*") + glob.glob("lib*.dylib") + glob.glob("lib*.*.dylib"))):
+              # Use lstat so we don't follow symlinks (ggml's macOS build already
+              # uses symlink chains; we only want to group the concrete files).
+              try:
+                  st = os.lstat(f)
+              except OSError:
+                  continue
+              import stat as _stat
+              if _stat.S_ISLNK(st.st_mode):
+                  continue
+              if not _stat.S_ISREG(st.st_mode):
+                  continue
+              try:
                   with open(f, "rb") as fh:
                       h = hashlib.sha256(fh.read()).hexdigest()
-                  groups.setdefault(h, []).append(f)
+              except OSError as e:
+                  print(f"  skip {f}: {e}")
+                  continue
+              groups.setdefault(h, []).append(f)
           saved = 0
           for h, files in groups.items():
               if len(files) < 2:
@@ -236,11 +250,14 @@ jobs:
               files.sort(key=len, reverse=True)
               real, others = files[0], files[1:]
               for other in others:
-                  size = os.path.getsize(other)
-                  os.unlink(other)
-                  os.symlink(real, other)
-                  saved += size
-                  print(f"  symlinked {other} -> {real}")
+                  try:
+                      size = os.path.getsize(other)
+                      os.unlink(other)
+                      os.symlink(real, other)
+                      saved += size
+                      print(f"  symlinked {other} -> {real}")
+                  except OSError as e:
+                      print(f"  skip {other}: {e}")
           print(f"  saved {saved} bytes")
           PY
           # macOS: rewrite dylib IDs and add @executable_path to the binary rpath so
