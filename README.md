@@ -375,6 +375,30 @@ python scripts/convert_tts_to_gguf.py \
 
 Base variants (`-Base` on HF) carry no preset list — use voice cloning via `-r reference.wav` instead. The Python server's `/v1/audio/voices` endpoint lists both local JSON embeddings (from `voices/`) and model-level presets; `/v1/audio/speech` accepts either kind in the `voice` field.
 
+### Fine-Tuned Custom Voices
+
+If you want to train your own reusable preset speaker rather than using the stock CustomVoice checkpoints, see [docs/fine-tuning-custom-voices.md](./docs/fine-tuning-custom-voices.md).
+
+The supported path today is:
+
+1. fine-tune `Qwen/Qwen3-TTS-12Hz-1.7B-Base` with the upstream `QwenLM/Qwen3-TTS` fine-tuning scripts
+2. convert the selected checkpoint to GGUF with `scripts/convert_tts_to_gguf.py`
+3. load it explicitly with `--tts-model <file>` in `qwen3-tts.cpp`
+
+Example validation flow:
+
+```bash
+./build/qwen3-tts-cli -m models \
+  --tts-model qwen3-tts-1.7b-my-voice-f16.gguf \
+  --list-speakers
+
+./build/qwen3-tts-cli -m models \
+  --tts-model qwen3-tts-1.7b-my-voice-f16.gguf \
+  --speaker my_voice -t "Hello from my fine-tuned voice." -o out.wav
+```
+
+Do not rely on default model auto-detection for fine-tuned checkpoints, and do not assume the current Python server or C API can select arbitrary fine-tuned TTS model filenames cleanly.
+
 ### Speaker Embedding Workflow
 
 Precompute a speaker embedding once (saves ~20s per synthesis):
