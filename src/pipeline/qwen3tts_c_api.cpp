@@ -126,9 +126,6 @@ Qwen3TtsAudio * qwen3_tts_synthesize(
     if (!tts || !text) return nullptr;
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
-    if (cpp_params.n_threads > 0) {
-        tts->engine.set_n_threads(cpp_params.n_threads);
-    }
     auto result = tts->engine.synthesize(text, cpp_params);
     if (!result.success) {
         tts->last_error = result.error_msg;
@@ -160,9 +157,6 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_voice_file(
     if (!tts || !text || !reference_audio_path) return nullptr;
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
-    if (cpp_params.n_threads > 0) {
-        tts->engine.set_n_threads(cpp_params.n_threads);
-    }
     auto result = tts->engine.synthesize_with_voice(text, reference_audio_path, cpp_params);
     if (!result.success) {
         tts->last_error = result.error_msg;
@@ -179,9 +173,6 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_voice_samples(
     if (!tts || !text || !ref_samples || n_ref_samples <= 0) return nullptr;
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
-    if (cpp_params.n_threads > 0) {
-        tts->engine.set_n_threads(cpp_params.n_threads);
-    }
     auto result = tts->engine.synthesize_with_voice(text, ref_samples, n_ref_samples, cpp_params);
     if (!result.success) {
         tts->last_error = result.error_msg;
@@ -246,9 +237,6 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_embedding(
     if (!tts || !text || !embedding || embedding_size <= 0) return nullptr;
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
-    if (cpp_params.n_threads > 0) {
-        tts->engine.set_n_threads(cpp_params.n_threads);
-    }
     auto result = tts->engine.synthesize_with_embedding(text, embedding, embedding_size, cpp_params);
     if (!result.success) {
         tts->last_error = result.error_msg;
@@ -278,9 +266,6 @@ Qwen3TtsAudio * qwen3_tts_synthesize_icl_file(
     }
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
-    if (cpp_params.n_threads > 0) {
-        tts->engine.set_n_threads(cpp_params.n_threads);
-    }
     cpp_params.ref_text = reference_text;
     auto result = tts->engine.synthesize_with_voice(text, reference_audio_path, cpp_params);
     if (!result.success) {
@@ -307,9 +292,6 @@ Qwen3TtsIclPrompt * qwen3_tts_prepare_icl_prompt_file(
     }
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
-    if (cpp_params.n_threads > 0) {
-        tts->engine.set_n_threads(cpp_params.n_threads);
-    }
     auto * out = new Qwen3TtsIclPrompt;
     if (!tts->engine.prepare_icl_prompt(reference_audio_path, reference_text, cpp_params, out->prompt)) {
         tts->last_error = tts->engine.get_error();
@@ -336,9 +318,6 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_icl_prompt(
     }
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
-    if (cpp_params.n_threads > 0) {
-        tts->engine.set_n_threads(cpp_params.n_threads);
-    }
     auto result = tts->engine.synthesize_with_icl_prompt(text, prompt->prompt, cpp_params);
     if (!result.success) {
         tts->last_error = result.error_msg;

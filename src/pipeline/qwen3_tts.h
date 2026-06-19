@@ -178,6 +178,9 @@ public:
     // Set default backend thread count and apply it to loaded backends where supported.
     void set_n_threads(int32_t n_threads);
 
+    // Get the configured default backend thread count.
+    int32_t get_n_threads() const { return n_threads_; }
+
     // Model metadata
     const std::string & get_model_type() const;  // "base" | "custom_voice" | "voice_design"
     const std::string & get_model_size() const;  // e.g. "0b6" | "1b7" (empty on older GGUFs)
@@ -212,6 +215,7 @@ public:
     
 private:
     int32_t effective_n_threads(const tts_params & params) const;
+    void apply_n_threads(int32_t n_threads);
 
     bool prepare_icl_prompt_from_samples(const float * ref_samples,
                                          int32_t n_ref_samples,
