@@ -187,6 +187,8 @@ public:
     bool is_loaded() const { return models_loaded_; }
     
 private:
+    int32_t effective_n_threads(const tts_params & params) const;
+
     tts_result synthesize_internal(const std::string & text,
                                    const float * speaker_embedding,
                                    const tts_params & params,
@@ -206,6 +208,7 @@ private:
     bool transformer_loaded_ = false;
     bool decoder_loaded_ = false;
     bool low_mem_mode_ = false;
+    int32_t n_threads_ = 4;
     std::string error_msg_;
     std::string tts_model_path_;
     std::string decoder_model_path_;

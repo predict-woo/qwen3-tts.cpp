@@ -37,5 +37,21 @@ int main() {
     assert(!unloaded_result.success);
     assert(qwen3_tts::get_default_backend_n_threads() == 6);
 
+    qwen3_tts::Qwen3TTS engine_a;
+    qwen3_tts::Qwen3TTS engine_b;
+    engine_a.set_n_threads(8);
+    engine_b.set_n_threads(5);
+    assert(qwen3_tts::get_default_backend_n_threads() == 5);
+
+    qwen3_tts::tts_params no_override_params;
+    assert(no_override_params.n_threads == 0);
+    unloaded_result = engine_a.synthesize_with_voice("engine a default", nullptr, 0, no_override_params);
+    assert(!unloaded_result.success);
+    assert(qwen3_tts::get_default_backend_n_threads() == 8);
+
+    unloaded_result = engine_b.synthesize_with_voice("engine b default", nullptr, 0, no_override_params);
+    assert(!unloaded_result.success);
+    assert(qwen3_tts::get_default_backend_n_threads() == 5);
+
     return 0;
 }
