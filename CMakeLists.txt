@@ -205,7 +205,7 @@ add_executable(test_backend_threads
     tests/test_backend_threads.cpp
 )
 target_link_libraries(test_backend_threads PRIVATE
-    qwen3_tts_common
+    qwen3_tts
     Threads::Threads
 )
 
