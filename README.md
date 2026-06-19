@@ -315,6 +315,8 @@ Place both `.gguf` files in a `models/` directory.
 | `--max-tokens <n>` | Maximum audio frames (codec tokens) to generate | 2048 |
 | `--repetition-penalty <val>` | Repetition penalty on codebook-0 token generation | 1.05 |
 | `--seed <n>` | RNG seed for reproducible output | (random) |
+| `--benchmark-json <file>` | Write structured timing, model, backend, and memory metrics after synthesis | (none) |
+| `--quiet-progress` | Suppress progress/status/timing logs for benchmark runs | off |
 | `--no-f32-acc` | Disable f32 matmul accumulation (faster, less precise) | (off) |
 | `-l, --language <lang>` | Language: en, ru, zh, ja, ko, de, fr, es | en |
 | `-j, --threads <n>` | Number of compute threads | 4 |
@@ -461,6 +463,12 @@ There is no separate `metal` or `vulkan` value — those are reached via `auto`.
 | `QWEN3_TTS_USE_COREML` | `1` on macOS when model exists | Set to `0` to disable the CoreML code-predictor bridge without rebuilding. |
 | `QWEN3_TTS_COREML_MODEL` | auto-detected | Absolute path override for a custom `.mlpackage` location (macOS only). |
 
+### Thread controls
+
+The CLI `-j/--threads`, C API `qwen3_tts_create(model_dir, n_threads)`, and server `QWEN3TTS_THREADS` setting configure the engine's default GGML compute thread count. They apply to CPU backends and to GGML backends that expose a thread setter. GPU-only work may ignore this setting.
+
+For C API per-call parameters, `Qwen3TtsParams.n_threads == 0` means "use the engine default". Set a positive value only when a specific call should override the handle default.
+
 ## C API
 
 The shared library `libqwen3tts.{so,dylib,dll}` is built automatically by CMake (the `qwen3tts_shared` target). It provides a C-linkage API for FFI integration from Python, Rust, Nim, Go, etc.
@@ -473,7 +481,7 @@ typedef struct Qwen3TtsParams {
     float   temperature;         // default: 0.9, 0=greedy
     float   top_p;               // default: 1.0
     int32_t top_k;               // default: 50, 0=disabled
-    int32_t n_threads;           // default: 4
+    int32_t n_threads;           // default: 0 (use handle default)
     float   repetition_penalty;  // default: 1.05
     int32_t language_id;         // 2050=en, 2058=ja, 2055=zh, etc.
 } Qwen3TtsParams;
@@ -495,6 +503,10 @@ typedef struct Qwen3TtsAudio {
 | `qwen3_tts_synthesize(tts, text, params)` | Text to audio |
 | `qwen3_tts_synthesize_with_voice_file(tts, text, wav_path, params)` | Voice clone from WAV |
 | `qwen3_tts_synthesize_with_voice_samples(tts, text, samples, n, params)` | Voice clone from float32 |
+| `qwen3_tts_synthesize_icl_file(tts, text, wav_path, ref_text, params)` | ICL voice cloning from WAV plus transcript |
+| `qwen3_tts_prepare_icl_prompt_file(tts, wav_path, ref_text, params)` | Prepare reusable ICL reference prompt state |
+| `qwen3_tts_synthesize_with_icl_prompt(tts, text, prompt, params)` | Synthesize using a prepared ICL prompt |
+| `qwen3_tts_free_icl_prompt(prompt)` | Free a prepared ICL prompt handle |
 | `qwen3_tts_extract_embedding_file(tts, wav_path, buf, max)` | Extract speaker embedding |
 | `qwen3_tts_synthesize_with_embedding(tts, text, emb, size, params)` | Synthesize with cached embedding |
 | `qwen3_tts_sample_rate(tts)` | Returns 24000 |
@@ -530,6 +542,7 @@ A full Python binding is provided in `server/qwen3_tts_binding.py`. See the [Ser
 ### Memory Management
 
 - Every `Qwen3TtsAudio*` returned by synthesis functions must be freed with `qwen3_tts_free_audio()`
+- Every `Qwen3TtsIclPrompt*` returned by `qwen3_tts_prepare_icl_prompt_file()` must be freed with `qwen3_tts_free_icl_prompt()`. Prepared prompts are tied to compatible model dimensions and should not be shared across different engines or model layouts.
 - The engine handle must be destroyed with `qwen3_tts_destroy()`
 - The `qwen3_tts_get_error()` string is owned by the engine and valid until the next API call
 
@@ -636,6 +649,28 @@ Example output (92 frames, 7.3s audio):
 ```
 
 The code predictor (15 sequential forward passes per frame) accounts for ~71% of generation time.
+
+### Structured benchmark output
+
+For repeatable local comparisons across macOS, Linux, and Windows, write a JSON record from the CLI:
+
+```bash
+cmake -S . -B build-perf -DQWEN3_TTS_TIMING=ON
+cmake --build build-perf -j4
+
+./build-perf/qwen3-tts-cli \
+  -m models \
+  -t "Benchmark smoke test." \
+  --seed 1234 \
+  --max-tokens 64 \
+  --benchmark-json bench.json \
+  --quiet-progress \
+  -o bench.wav
+```
+
+The JSON includes the synthesis mode, selected backend/device, thread count, model metadata, output audio duration, wall-clock phase timings, memory counters, `speed_x_realtime`, and `wall_rtf`. When built with `QWEN3_TTS_TIMING=ON`, it also includes detailed graph build, graph allocation, compute, and data-transfer timing fields.
+
+In local gating for graph-lifecycle reuse, the 0.6B Q8_0 BLAS path spent about 17 ms in code-predictor graph build/allocation during a 999 ms generation step. That made graph reservation a low-impact optimization for this repo at the time of measurement, so there is no user-facing graph-reservation knob documented here.
 
 ## Troubleshooting
 
