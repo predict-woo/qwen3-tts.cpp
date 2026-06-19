@@ -45,6 +45,7 @@ endif()
 
 # Common library (gguf_loader + coreml bridge — compiled once, shared by all)
 set(COMMON_SOURCES
+    src/common/backend_threads.cpp
     src/common/benchmark_json.cpp
     src/common/gguf_loader.cpp
     src/common/speaker_embedding_io.cpp
@@ -199,6 +200,15 @@ target_link_libraries(test_benchmark_json PRIVATE
     Threads::Threads
 )
 
+# Test executable for backend thread helper
+add_executable(test_backend_threads
+    tests/test_backend_threads.cpp
+)
+target_link_libraries(test_backend_threads PRIVATE
+    qwen3_tts_common
+    Threads::Threads
+)
+
 # Install targets
 install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_codec_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
@@ -206,6 +216,7 @@ install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_cod
     RUNTIME DESTINATION bin
 )
 install(FILES
+    src/common/backend_threads.h
     src/common/gguf_loader.h
     src/common/coreml_code_predictor.h
     src/tokenizer/text_tokenizer.h
@@ -237,5 +248,9 @@ add_test(NAME decoder_test
 )
 add_test(NAME benchmark_json_test
     COMMAND test_benchmark_json
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME backend_threads_test
+    COMMAND test_backend_threads
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )

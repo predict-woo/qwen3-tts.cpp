@@ -154,6 +154,9 @@ public:
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
 
+    // Set default backend thread count and apply it to loaded backends where supported.
+    void set_n_threads(int32_t n_threads);
+
     // Model metadata
     const std::string & get_model_type() const;  // "base" | "custom_voice" | "voice_design"
     const std::string & get_model_size() const;  // e.g. "0b6" | "1b7" (empty on older GGUFs)

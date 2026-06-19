@@ -320,6 +320,9 @@ public:
 
     // Force f32 accumulation in matmul (improves quality on some GPUs, default: on)
     void set_f32_acc(bool v) { f32_acc_ = v; }
+
+    // Apply thread count to loaded GGML backends where supported.
+    bool set_n_threads(int32_t n_threads);
     
     // Legacy interface for compatibility
     bool forward(const int32_t * tokens, int32_t n_tokens, int32_t n_past,

@@ -1,4 +1,5 @@
 #include "pipeline/qwen3_tts.h"
+#include "common/backend_threads.h"
 #include "common/gguf_loader.h"
 
 #include <cstdio>
@@ -115,6 +116,16 @@ static void resample_linear(const float * input, int input_len, int input_rate,
 Qwen3TTS::Qwen3TTS() = default;
 
 Qwen3TTS::~Qwen3TTS() = default;
+
+void Qwen3TTS::set_n_threads(int32_t n_threads) {
+    if (n_threads <= 0) {
+        return;
+    }
+
+    set_default_backend_n_threads(n_threads);
+    apply_default_backend_threads_to_preferred_backend();
+    transformer_.set_n_threads(n_threads);
+}
 
 bool Qwen3TTS::load_models(const std::string & model_dir,
                            const std::string & tts_model,
@@ -263,6 +274,10 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const float * ref_samples, int32_t n_ref_samples,
                                             const tts_params & params) {
     tts_result result;
+
+    if (params.n_threads > 0) {
+        set_n_threads(params.n_threads);
+    }
     
     if (!models_loaded_) {
         result.error_msg = "Models not loaded";
@@ -342,6 +357,10 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
 bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_ref_samples,
                                           std::vector<float> & embedding,
                                           const tts_params & params) {
+    if (params.n_threads > 0) {
+        set_n_threads(params.n_threads);
+    }
+
     if (!models_loaded_) {
         error_msg_ = "Models not loaded";
         return false;
@@ -404,6 +423,10 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
                                           tts_result & result,
                                           const int32_t * ref_codes,
                                           int32_t n_ref_frames) {
+    if (params.n_threads > 0) {
+        set_n_threads(params.n_threads);
+    }
+
     int64_t t_total_start = get_time_ms();
     auto sample_memory = [&](const char * stage) {
         process_memory_snapshot mem;

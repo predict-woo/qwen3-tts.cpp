@@ -1,4 +1,5 @@
 #include "common/gguf_loader.h"
+#include "common/backend_threads.h"
 
 #include <cerrno>
 #include <climits>
@@ -156,6 +157,7 @@ ggml_backend_t init_preferred_backend(const char * component_name, std::string *
 
     auto & shared = get_shared_backend_state();
     if (shared.backend) {
+        apply_backend_n_threads(shared.backend, get_default_backend_n_threads());
         shared.ref_count++;
         return shared.backend;
     }
@@ -190,11 +192,20 @@ ggml_backend_t init_preferred_backend(const char * component_name, std::string *
     }
 
     if (backend) {
+        apply_backend_n_threads(backend, get_default_backend_n_threads());
         shared.backend = backend;
         shared.ref_count = 1;
     }
 
     return backend;
+}
+
+bool apply_default_backend_threads_to_preferred_backend() {
+    auto & shared = get_shared_backend_state();
+    if (!shared.backend) {
+        return false;
+    }
+    return apply_backend_n_threads(shared.backend, get_default_backend_n_threads());
 }
 
 void release_preferred_backend(ggml_backend_t backend) {

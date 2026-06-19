@@ -5,6 +5,7 @@ import ctypes.util
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +173,9 @@ class QwenTTS:
 
     def __init__(self, model_dir: str, n_threads: int = 4):
         self._lib = _load_library()
+        self._n_threads = n_threads if n_threads > 0 else 4
         self._handle = self._lib.qwen3_tts_create(
-            model_dir.encode("utf-8"), n_threads
+            model_dir.encode("utf-8"), self._n_threads
         )
         if not self._handle:
             raise RuntimeError(f"Failed to load models from {model_dir}")
@@ -186,11 +188,13 @@ class QwenTTS:
         language_id: int = 2050,
         max_audio_tokens: int = 2048,
         repetition_penalty: float = 1.05,
+        n_threads: Optional[int] = None,
     ) -> tuple[list[float], int]:
         """Synthesize text to audio. Returns (samples, sample_rate)."""
         params = self._make_params(
             temperature=temperature, top_k=top_k, language_id=language_id,
             max_audio_tokens=max_audio_tokens, repetition_penalty=repetition_penalty,
+            n_threads=n_threads if n_threads is not None else self._n_threads,
         )
         audio_ptr = self._lib.qwen3_tts_synthesize(
             self._handle, text.encode("utf-8"), ctypes.byref(params)
@@ -206,11 +210,13 @@ class QwenTTS:
         language_id: int = 2050,
         max_audio_tokens: int = 2048,
         repetition_penalty: float = 1.05,
+        n_threads: Optional[int] = None,
     ) -> tuple[list[float], int]:
         """Synthesize with a pre-computed speaker embedding."""
         params = self._make_params(
             temperature=temperature, top_k=top_k, language_id=language_id,
             max_audio_tokens=max_audio_tokens, repetition_penalty=repetition_penalty,
+            n_threads=n_threads if n_threads is not None else self._n_threads,
         )
         emb_arr = (ctypes.c_float * len(embedding))(*embedding)
         audio_ptr = self._lib.qwen3_tts_synthesize_with_embedding(
@@ -302,6 +308,7 @@ class QwenTTS:
         language_id: int = 2050,
         max_audio_tokens: int = 2048,
         repetition_penalty: float = 1.05,
+        n_threads: Optional[int] = None,
     ) -> tuple[list[float], int]:
         """Synthesize with in-context-learning voice cloning.
 
@@ -312,6 +319,7 @@ class QwenTTS:
         params = self._make_params(
             temperature=temperature, top_k=top_k, language_id=language_id,
             max_audio_tokens=max_audio_tokens, repetition_penalty=repetition_penalty,
+            n_threads=n_threads if n_threads is not None else self._n_threads,
         )
         audio_ptr = self._lib.qwen3_tts_synthesize_icl_file(
             self._handle, text.encode("utf-8"),
@@ -341,7 +349,10 @@ class QwenTTS:
     def _make_params(self, **kwargs) -> Qwen3TtsParams:
         params = Qwen3TtsParams()
         self._lib.qwen3_tts_default_params(ctypes.byref(params))
+        params.n_threads = self._n_threads
         for key, value in kwargs.items():
+            if value is None:
+                continue
             setattr(params, key, value)
         return params
 
