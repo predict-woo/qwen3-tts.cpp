@@ -44,7 +44,11 @@ else()
 endif()
 
 # Common library (gguf_loader + coreml bridge — compiled once, shared by all)
-set(COMMON_SOURCES src/common/gguf_loader.cpp src/common/speaker_embedding_io.cpp)
+set(COMMON_SOURCES
+    src/common/benchmark_json.cpp
+    src/common/gguf_loader.cpp
+    src/common/speaker_embedding_io.cpp
+)
 if(APPLE AND QWEN3_TTS_COREML)
     list(APPEND COMMON_SOURCES src/common/coreml_code_predictor.mm)
     set_source_files_properties(src/common/coreml_code_predictor.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
@@ -186,6 +190,15 @@ target_link_libraries(test_decoder PRIVATE
     Threads::Threads
 )
 
+# Test executable for benchmark JSON helper
+add_executable(test_benchmark_json
+    tests/test_benchmark_json.cpp
+)
+target_link_libraries(test_benchmark_json PRIVATE
+    qwen3_tts_common
+    Threads::Threads
+)
+
 # Install targets
 install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_codec_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
@@ -220,5 +233,9 @@ add_test(NAME transformer_test
 )
 add_test(NAME decoder_test
     COMMAND test_decoder
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME benchmark_json_test
+    COMMAND test_benchmark_json
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )

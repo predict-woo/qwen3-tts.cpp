@@ -89,6 +89,11 @@ struct tts_result {
     uint64_t mem_phys_start_bytes = 0;
     uint64_t mem_phys_end_bytes = 0;
     uint64_t mem_phys_peak_bytes = 0;
+
+#ifdef QWEN3_TTS_TIMING
+    bool has_detailed_timing = false;
+    tts_timing detailed_timing = {};
+#endif
     
 };
 
@@ -171,6 +176,9 @@ public:
 
     // Get error message
     const std::string & get_error() const { return error_msg_; }
+
+    const std::string & get_tts_model_path() const { return tts_model_path_; }
+    const std::string & get_decoder_model_path() const { return decoder_model_path_; }
 
     // Check if models are loaded
     bool is_loaded() const { return models_loaded_; }

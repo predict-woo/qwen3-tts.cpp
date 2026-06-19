@@ -1,10 +1,104 @@
 #include "pipeline/qwen3_tts.h"
+#include "common/benchmark_json.h"
 #include "common/speaker_embedding_io.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+namespace {
+
+std::string basename_of(const std::string & path) {
+    const size_t pos = path.find_last_of("/\\");
+    return pos == std::string::npos ? path : path.substr(pos + 1);
+}
+
+std::string env_or_default(const char * name, const char * fallback) {
+    const char * value = std::getenv(name);
+    return value && value[0] != '\0' ? std::string(value) : std::string(fallback);
+}
+
+std::string infer_quantization(const std::string & model_name) {
+    const std::string name = basename_of(model_name);
+    const char * known[] = {
+        "q2_k", "q3_k", "q4_0", "q4_1", "q4_k", "q5_0", "q5_1",
+        "q5_k", "q6_k", "q8_0", "f16", "f32"
+    };
+    for (const char * q : known) {
+        if (name.find(q) != std::string::npos) {
+            return q;
+        }
+    }
+    return std::string();
+}
+
+qwen3_tts::benchmark_record make_benchmark_record(const qwen3_tts::Qwen3TTS & tts,
+                                                   const qwen3_tts::tts_result & result,
+                                                   const qwen3_tts::tts_params & params,
+                                                   const std::string & mode,
+                                                   const std::string & text) {
+    qwen3_tts::benchmark_record record;
+    record.mode = mode;
+    record.backend = env_or_default("QWEN3_TTS_BACKEND", "auto");
+    record.device = env_or_default("QWEN3_TTS_DEVICE", "");
+    record.thread_count = params.n_threads;
+    record.model_type = tts.get_model_type();
+    record.model_size = tts.get_model_size();
+    record.tts_model = basename_of(tts.get_tts_model_path());
+    record.tokenizer_model = basename_of(tts.get_decoder_model_path());
+    record.quantization = infer_quantization(record.tts_model);
+    record.text = text;
+    record.audio_seconds = result.sample_rate > 0
+        ? static_cast<double>(result.audio.size()) / static_cast<double>(result.sample_rate)
+        : 0.0;
+    record.tokenize_ms = result.t_tokenize_ms;
+    record.encode_ms = result.t_encode_ms;
+    record.generate_ms = result.t_generate_ms;
+    record.decode_ms = result.t_decode_ms;
+    record.total_ms = result.t_total_ms;
+    record.mem_rss_start_bytes = result.mem_rss_start_bytes;
+    record.mem_rss_end_bytes = result.mem_rss_end_bytes;
+    record.mem_rss_peak_bytes = result.mem_rss_peak_bytes;
+    record.mem_phys_start_bytes = result.mem_phys_start_bytes;
+    record.mem_phys_end_bytes = result.mem_phys_end_bytes;
+    record.mem_phys_peak_bytes = result.mem_phys_peak_bytes;
+
+#ifdef QWEN3_TTS_TIMING
+    if (result.has_detailed_timing) {
+        const qwen3_tts::tts_timing & timing = result.detailed_timing;
+        record.has_detailed_timing = true;
+        record.prefill_build_ms = timing.t_prefill_build_ms;
+        record.prefill_forward_ms = timing.t_prefill_forward_ms;
+        record.prefill_graph_build_ms = timing.t_prefill_graph_build_ms;
+        record.prefill_graph_alloc_ms = timing.t_prefill_graph_alloc_ms;
+        record.prefill_compute_ms = timing.t_prefill_compute_ms;
+        record.prefill_data_ms = timing.t_prefill_data_ms;
+        record.talker_forward_ms = timing.t_talker_forward_ms;
+        record.talker_graph_build_ms = timing.t_talker_graph_build_ms;
+        record.talker_graph_alloc_ms = timing.t_talker_graph_alloc_ms;
+        record.talker_compute_ms = timing.t_talker_compute_ms;
+        record.talker_data_ms = timing.t_talker_data_ms;
+        record.code_pred_ms = timing.t_code_pred_ms;
+        record.code_pred_init_ms = timing.t_code_pred_init_ms;
+        record.code_pred_prefill_ms = timing.t_code_pred_prefill_ms;
+        record.code_pred_steps_ms = timing.t_code_pred_steps_ms;
+        record.code_pred_graph_build_ms = timing.t_code_pred_graph_build_ms;
+        record.code_pred_graph_alloc_ms = timing.t_code_pred_graph_alloc_ms;
+        record.code_pred_compute_ms = timing.t_code_pred_compute_ms;
+        record.code_pred_data_ms = timing.t_code_pred_data_ms;
+        record.code_pred_coreml_ms = timing.t_code_pred_coreml_ms;
+        record.embed_lookup_ms = timing.t_embed_lookup_ms;
+        record.frames = timing.n_frames;
+        record.generate_total_ms = timing.t_generate_total_ms;
+    }
+#endif
+
+    return record;
+}
+
+} // namespace
 
 void print_usage(const char * program) {
     fprintf(stderr, "Usage: %s [options] -m <model_dir> -t <text>\n", program);
@@ -29,6 +123,8 @@ void print_usage(const char * program) {
     fprintf(stderr, "  --speaker <name>       Use a built-in preset voice (CustomVoice models only)\n");
     fprintf(stderr, "  --list-speakers        List preset voices available in the loaded model and exit\n");
     fprintf(stderr, "  --ref-text <text>      Reference transcript (with -r) for ICL voice cloning\n");
+    fprintf(stderr, "  --benchmark-json <file> Write structured benchmark JSON after synthesis\n");
+    fprintf(stderr, "  --quiet-progress       Suppress CLI progress/status/timing output for benchmark runs\n");
     fprintf(stderr, "  -l, --language <lang>  Language: en,ru,zh,ja,ko,de,fr,es (default: en)\n");
     fprintf(stderr, "  -j, --threads <n>      Number of threads (default: 4)\n");
     fprintf(stderr, "  -h, --help             Show this help\n");
@@ -57,6 +153,8 @@ int main(int argc, char ** argv) {
     std::string speaker_preset;
     bool list_speakers = false;
     std::string ref_text;
+    std::string benchmark_json_file;
+    bool quiet_progress = false;
     
     qwen3_tts::tts_params params;
     
@@ -129,6 +227,14 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             ref_text = argv[i];
+        } else if (arg == "--benchmark-json") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing benchmark JSON file\n");
+                return 1;
+            }
+            benchmark_json_file = argv[i];
+        } else if (arg == "--quiet-progress") {
+            quiet_progress = true;
         } else if (arg == "--temperature") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing temperature value\n");
@@ -234,10 +340,17 @@ int main(int argc, char ** argv) {
         params.ref_text = ref_text;
     }
 
+    if (quiet_progress) {
+        params.print_progress = false;
+        params.print_timing = false;
+    }
+
     // Initialize TTS
     qwen3_tts::Qwen3TTS tts;
     
-    fprintf(stderr, "Loading models from: %s\n", model_dir.c_str());
+    if (!quiet_progress) {
+        fprintf(stderr, "Loading models from: %s\n", model_dir.c_str());
+    }
     if (!tts.load_models(model_dir, tts_model, tokenizer_model)) {
         fprintf(stderr, "Error: %s\n", tts.get_error().c_str());
         return 1;
@@ -266,15 +379,18 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
-    // Set progress callback
-    tts.set_progress_callback([](int tokens, int max_tokens) {
-        fprintf(stderr, "\rGenerating: %d/%d tokens", tokens, max_tokens);
-    });
+    if (!quiet_progress) {
+        tts.set_progress_callback([](int tokens, int max_tokens) {
+            fprintf(stderr, "\rGenerating: %d/%d tokens", tokens, max_tokens);
+        });
+    }
 
     // Generate speech
     qwen3_tts::tts_result result;
+    std::string benchmark_mode;
 
     if (!speaker_preset.empty()) {
+        benchmark_mode = "preset";
         // Preset voice from CustomVoice model: resolve name → codec_embd row.
         std::vector<float> embedding;
         if (!tts.get_speaker_embedding(speaker_preset, embedding)) {
@@ -290,25 +406,36 @@ int main(int argc, char ** argv) {
             }
             return 1;
         }
-        fprintf(stderr, "Synthesizing with preset voice '%s' (%d dims): \"%s\"\n",
-                speaker_preset.c_str(), (int)embedding.size(), text.c_str());
+        if (!quiet_progress) {
+            fprintf(stderr, "Synthesizing with preset voice '%s' (%d dims): \"%s\"\n",
+                    speaker_preset.c_str(), (int)embedding.size(), text.c_str());
+        }
         result = tts.synthesize_with_embedding(text, embedding.data(), (int32_t)embedding.size(), params);
     } else if (!speaker_embedding_file.empty()) {
+        benchmark_mode = "speaker_embedding";
         // Use precomputed speaker embedding
         std::vector<float> embedding;
         if (!qwen3_tts::load_speaker_embedding(speaker_embedding_file, embedding)) {
             fprintf(stderr, "Error: failed to load speaker embedding from %s\n", speaker_embedding_file.c_str());
             return 1;
         }
-        fprintf(stderr, "Synthesizing with speaker embedding (%d dims): \"%s\"\n",
-                (int)embedding.size(), text.c_str());
+        if (!quiet_progress) {
+            fprintf(stderr, "Synthesizing with speaker embedding (%d dims): \"%s\"\n",
+                    (int)embedding.size(), text.c_str());
+        }
         result = tts.synthesize_with_embedding(text, embedding.data(), (int32_t)embedding.size(), params);
     } else if (reference_audio.empty()) {
-        fprintf(stderr, "Synthesizing: \"%s\"\n", text.c_str());
+        benchmark_mode = "default";
+        if (!quiet_progress) {
+            fprintf(stderr, "Synthesizing: \"%s\"\n", text.c_str());
+        }
         result = tts.synthesize(text, params);
     } else {
-        fprintf(stderr, "Synthesizing with voice cloning: \"%s\"\n", text.c_str());
-        fprintf(stderr, "Reference audio: %s\n", reference_audio.c_str());
+        benchmark_mode = ref_text.empty() ? "xvector_voice_clone" : "icl_voice_clone";
+        if (!quiet_progress) {
+            fprintf(stderr, "Synthesizing with voice cloning: \"%s\"\n", text.c_str());
+            fprintf(stderr, "Reference audio: %s\n", reference_audio.c_str());
+        }
 
         // Optionally dump the speaker embedding for reuse
         if (!dump_speaker_embedding_file.empty()) {
@@ -324,8 +451,10 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             if (qwen3_tts::save_speaker_embedding(dump_speaker_embedding_file, embedding)) {
-                fprintf(stderr, "Speaker embedding saved to: %s (%d dims)\n",
-                        dump_speaker_embedding_file.c_str(), (int)embedding.size());
+                if (!quiet_progress) {
+                    fprintf(stderr, "Speaker embedding saved to: %s (%d dims)\n",
+                            dump_speaker_embedding_file.c_str(), (int)embedding.size());
+                }
             } else {
                 fprintf(stderr, "Warning: failed to save speaker embedding\n");
             }
@@ -339,7 +468,9 @@ int main(int argc, char ** argv) {
         return 1;
     }
     
-    fprintf(stderr, "\n");
+    if (!quiet_progress) {
+        fprintf(stderr, "\n");
+    }
     
     // Save output
     if (!qwen3_tts::save_audio_file(output_file, result.audio, result.sample_rate)) {
@@ -347,9 +478,24 @@ int main(int argc, char ** argv) {
         return 1;
     }
     
-    fprintf(stderr, "Output saved to: %s\n", output_file.c_str());
-    fprintf(stderr, "Audio duration: %.2f seconds\n", 
-            (float)result.audio.size() / result.sample_rate);
+    if (!quiet_progress) {
+        fprintf(stderr, "Output saved to: %s\n", output_file.c_str());
+        fprintf(stderr, "Audio duration: %.2f seconds\n",
+                (float)result.audio.size() / result.sample_rate);
+    }
+
+    if (!benchmark_json_file.empty()) {
+        const qwen3_tts::benchmark_record record =
+            make_benchmark_record(tts, result, params, benchmark_mode, text);
+        std::string error;
+        if (!qwen3_tts::write_benchmark_record_json(benchmark_json_file, record, error)) {
+            fprintf(stderr, "Error: %s\n", error.c_str());
+            return 1;
+        }
+        if (!quiet_progress) {
+            fprintf(stderr, "Benchmark JSON saved to: %s\n", benchmark_json_file.c_str());
+        }
+    }
     
     // Print timing
     if (params.print_timing) {

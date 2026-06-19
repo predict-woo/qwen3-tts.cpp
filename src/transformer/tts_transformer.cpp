@@ -2838,7 +2838,12 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     tts_timing timing = {};
     auto t_gen_start = clk::now();
     auto t0 = t_gen_start, t1 = t_gen_start;
+    has_last_timing_ = false;
     timing_ = &timing;
+    struct timing_scope {
+        tts_timing *& active;
+        ~timing_scope() { active = nullptr; }
+    } timing_scope_guard{timing_};
 #endif
 
     if (!model_.ctx) {
@@ -3059,7 +3064,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     
 #ifdef QWEN3_TTS_TIMING
     timing.t_generate_total_ms = std::chrono::duration<double, std::milli>(clk::now() - t_gen_start).count();
-    timing_ = nullptr;
+    last_timing_ = timing;
+    has_last_timing_ = true;
     const auto & t = timing;
     int nf = t.n_frames;
     fprintf(stderr, "\n=== Detailed Generation Timing (%d frames) ===\n", nf);
@@ -3103,6 +3109,12 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
 
     return true;
 }
+
+#ifdef QWEN3_TTS_TIMING
+const tts_timing * TTSTransformer::last_timing() const {
+    return has_last_timing_ ? &last_timing_ : nullptr;
+}
+#endif
 
 bool TTSTransformer::forward(const int32_t * tokens, int32_t n_tokens, int32_t n_past,
                               std::vector<float> & output) {

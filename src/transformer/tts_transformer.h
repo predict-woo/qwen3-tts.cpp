@@ -310,6 +310,10 @@ public:
 
     const std::string & get_error() const { return error_msg_; }
 
+#ifdef QWEN3_TTS_TIMING
+    const tts_timing * last_timing() const;
+#endif
+
     // Set RNG seed for reproducible output
     void set_seed(uint32_t seed) { rng_.seed(seed); }
 
@@ -392,6 +396,8 @@ private:
 
 #ifdef QWEN3_TTS_TIMING
     tts_timing * timing_ = nullptr;
+    tts_timing last_timing_ = {};
+    bool has_last_timing_ = false;
 #endif
 };
 

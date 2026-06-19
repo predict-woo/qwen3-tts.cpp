@@ -500,6 +500,12 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
         return result;
     }
     result.t_generate_ms = get_time_ms() - t_generate_start;
+#ifdef QWEN3_TTS_TIMING
+    if (const tts_timing * timing = transformer_.last_timing()) {
+        result.detailed_timing = *timing;
+        result.has_detailed_timing = true;
+    }
+#endif
     sample_memory("synth/after-generate");
     
     int n_codebooks = transformer_.get_config().n_codebooks;
