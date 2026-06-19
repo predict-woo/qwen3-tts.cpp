@@ -121,6 +121,9 @@ public:
     const codec_encoder_config & get_config() const { return model_.config; }
     const std::string & get_error() const { return error_msg_; }
 
+    // Apply thread count to loaded GGML backends where supported.
+    bool set_n_threads(int32_t n_threads);
+
 private:
     struct ggml_cgraph * build_graph(int32_t n_samples);
 

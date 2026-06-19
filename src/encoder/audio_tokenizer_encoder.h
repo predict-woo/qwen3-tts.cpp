@@ -127,6 +127,9 @@ public:
     const speaker_encoder_config & get_config() const { return model_.config; }
     
     const std::string & get_error() const { return error_msg_; }
+
+    // Apply thread count to loaded GGML backends where supported.
+    bool set_n_threads(int32_t n_threads);
     
 private:
     // Compute mel spectrogram from waveform

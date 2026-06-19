@@ -125,6 +125,9 @@ void Qwen3TTS::set_n_threads(int32_t n_threads) {
     set_default_backend_n_threads(n_threads);
     apply_default_backend_threads_to_preferred_backend();
     transformer_.set_n_threads(n_threads);
+    audio_encoder_.set_n_threads(n_threads);
+    codec_encoder_.set_n_threads(n_threads);
+    audio_decoder_.set_n_threads(n_threads);
 }
 
 bool Qwen3TTS::load_models(const std::string & model_dir,

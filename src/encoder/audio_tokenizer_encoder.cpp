@@ -1,4 +1,5 @@
 #include "encoder/audio_tokenizer_encoder.h"
+#include "common/backend_threads.h"
 #include "common/gguf_loader.h"
 #include "ggml-cpu.h"
 
@@ -267,6 +268,7 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
             error_msg_ = "Failed to initialize CPU fallback backend for AudioTokenizerEncoder";
             return false;
         }
+        apply_backend_n_threads(state_.backend_cpu, get_default_backend_n_threads());
     }
 
     std::vector<ggml_backend_t> backends;
@@ -283,6 +285,21 @@ bool AudioTokenizerEncoder::load_model(const std::string & model_path) {
     state_.compute_meta.resize(ggml_tensor_overhead() * QWEN3_TTS_MAX_NODES + ggml_graph_overhead());
     
     return true;
+}
+
+bool AudioTokenizerEncoder::set_n_threads(int32_t n_threads) {
+    if (n_threads <= 0) {
+        return false;
+    }
+
+    bool applied = false;
+    if (state_.backend) {
+        applied = apply_backend_n_threads(state_.backend, n_threads) || applied;
+    }
+    if (state_.backend_cpu) {
+        applied = apply_backend_n_threads(state_.backend_cpu, n_threads) || applied;
+    }
+    return applied;
 }
 
 bool AudioTokenizerEncoder::compute_mel_spectrogram(const float * samples, int32_t n_samples,

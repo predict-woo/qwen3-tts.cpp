@@ -4,6 +4,7 @@
 // talker's codec vocabulary — the "codes" path for CustomVoice-style cloning.
 
 #include "encoder/audio_codec_encoder.h"
+#include "common/backend_threads.h"
 #include "common/gguf_loader.h"
 #include "ggml-cpu.h"
 
@@ -253,6 +254,7 @@ bool AudioCodecEncoder::load_model(const std::string & model_path) {
             error_msg_ = "failed to init CPU fallback for AudioCodecEncoder";
             return false;
         }
+        apply_backend_n_threads(state_.backend_cpu, get_default_backend_n_threads());
     }
 
     std::vector<ggml_backend_t> backends;
@@ -267,6 +269,21 @@ bool AudioCodecEncoder::load_model(const std::string & model_path) {
 
     state_.compute_meta.resize(ggml_tensor_overhead() * ENC_MAX_NODES + ggml_graph_overhead());
     return true;
+}
+
+bool AudioCodecEncoder::set_n_threads(int32_t n_threads) {
+    if (n_threads <= 0) {
+        return false;
+    }
+
+    bool applied = false;
+    if (state_.backend) {
+        applied = apply_backend_n_threads(state_.backend, n_threads) || applied;
+    }
+    if (state_.backend_cpu) {
+        applied = apply_backend_n_threads(state_.backend_cpu, n_threads) || applied;
+    }
+    return applied;
 }
 
 // --- graph building --------------------------------------------------------
