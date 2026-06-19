@@ -495,7 +495,8 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
                                ref_text_tokens.empty() ? nullptr : ref_text_tokens.data(),
                                (int32_t)ref_text_tokens.size(),
                                icl_mode ? ref_codes : nullptr,
-                               icl_mode ? n_ref_frames : 0)) {
+                               icl_mode ? n_ref_frames : 0,
+                               params.print_timing)) {
         result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
         return result;
     }

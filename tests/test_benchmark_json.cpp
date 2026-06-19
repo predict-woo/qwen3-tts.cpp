@@ -7,6 +7,8 @@ int main() {
     qwen3_tts::benchmark_record r;
     r.mode = "default";
     r.backend = "cpu";
+    r.tts_model = "qwen3-tts-0.6b-q8_0.gguf";
+    r.decoder_model = "qwen3-tts-tokenizer-f16.gguf";
     r.text = "hello \"tts\"\nnext";
     r.audio_seconds = 2.0;
     r.total_ms = 1000;
@@ -18,6 +20,9 @@ int main() {
 
     const std::string json = qwen3_tts::benchmark_record_to_json(r);
     assert(json.find("\"mode\":\"default\"") != std::string::npos);
+    assert(json.find("\"tts_model\":\"qwen3-tts-0.6b-q8_0.gguf\"") != std::string::npos);
+    assert(json.find("\"decoder_model\":\"qwen3-tts-tokenizer-f16.gguf\"") != std::string::npos);
+    assert(json.find("\"tokenizer_model\"") == std::string::npos);
     assert(json.find("hello \\\"tts\\\"\\nnext") != std::string::npos);
     assert(json.find("\"speed_x_realtime\":2") != std::string::npos);
     assert(json.find("\"wall_rtf\":0.5") != std::string::npos);

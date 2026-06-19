@@ -14,7 +14,7 @@ struct benchmark_record {
     std::string model_type;
     std::string model_size;
     std::string tts_model;
-    std::string tokenizer_model;
+    std::string decoder_model;
     std::string quantization;
 
     std::string text;

@@ -47,7 +47,7 @@ qwen3_tts::benchmark_record make_benchmark_record(const qwen3_tts::Qwen3TTS & tt
     record.model_type = tts.get_model_type();
     record.model_size = tts.get_model_size();
     record.tts_model = basename_of(tts.get_tts_model_path());
-    record.tokenizer_model = basename_of(tts.get_decoder_model_path());
+    record.decoder_model = basename_of(tts.get_decoder_model_path());
     record.quantization = infer_quantization(record.tts_model);
     record.text = text;
     record.audio_seconds = result.sample_rate > 0

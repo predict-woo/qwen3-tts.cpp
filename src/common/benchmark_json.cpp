@@ -91,7 +91,7 @@ std::string benchmark_record_to_json(const benchmark_record & r) {
     append_string(out, first, "model_type", r.model_type);
     append_string(out, first, "model_size", r.model_size);
     append_string(out, first, "tts_model", r.tts_model);
-    append_string(out, first, "tokenizer_model", r.tokenizer_model);
+    append_string(out, first, "decoder_model", r.decoder_model);
     append_string(out, first, "quantization", r.quantization);
     append_string(out, first, "text", r.text);
     append_double(out, first, "audio_seconds", r.audio_seconds);

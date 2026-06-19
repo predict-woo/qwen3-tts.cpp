@@ -304,7 +304,8 @@ public:
                   const int32_t * ref_text_tokens = nullptr,
                   int32_t n_ref_text_tokens = 0,
                   const int32_t * ref_codes = nullptr,
-                  int32_t n_ref_frames = 0);
+                  int32_t n_ref_frames = 0,
+                  bool print_timing = true);
     
     const tts_transformer_config & get_config() const { return model_.config; }
 
