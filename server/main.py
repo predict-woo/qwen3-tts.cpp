@@ -4,6 +4,8 @@ Serves POST /v1/audio/speech following the OpenAI TTS API spec.
 Uses the qwen3-tts C shared library via ctypes.
 """
 
+from __future__ import annotations
+
 import array
 import asyncio
 import io
@@ -19,6 +21,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from icl_cache import IclPromptCache, build_icl_prompt_cache_key
 from qwen3_tts_binding import QwenTTS
 
 # ---------------------------------------------------------------------------
@@ -28,6 +31,8 @@ from qwen3_tts_binding import QwenTTS
 MODEL_DIR = os.environ.get("QWEN3TTS_MODEL_DIR", str(Path(__file__).parent.parent / "models"))
 VOICES_DIR = os.environ.get("QWEN3TTS_VOICES_DIR", str(Path(__file__).parent.parent / "voices"))
 N_THREADS = int(os.environ.get("QWEN3TTS_THREADS", "4"))
+ICL_CACHE_SIZE = int(os.environ.get("QWEN3TTS_ICL_CACHE_SIZE", "8"))
+DEFAULT_LANGUAGE_ID = 2050
 
 # ---------------------------------------------------------------------------
 # Global state
@@ -35,6 +40,7 @@ N_THREADS = int(os.environ.get("QWEN3TTS_THREADS", "4"))
 
 tts_engine: QwenTTS | None = None
 voice_embeddings: dict[str, list[float]] = {}
+icl_prompt_cache = IclPromptCache(ICL_CACHE_SIZE)
 _synthesis_lock = threading.Lock()  # C API is not thread-safe
 
 
@@ -63,8 +69,10 @@ async def lifespan(app: FastAPI):
     print(f"Scanning voices from: {VOICES_DIR}")
     load_voices()
     presets = tts_engine.list_speakers()
+    print(f"ICL prompt cache size: {icl_prompt_cache.max_entries}")
     print(f"Ready. {len(voice_embeddings)} JSON voice(s), {len(presets)} model preset(s).")
     yield
+    icl_prompt_cache.clear()
     if tts_engine:
         tts_engine.close()
         tts_engine = None
@@ -168,10 +176,34 @@ async def create_speech(request: SpeechRequest):
         try:
             def _do_icl():
                 with _synthesis_lock:
-                    return tts_engine.synthesize_icl(
-                        request.input, icl_ref_audio, icl_ref_text,
-                        temperature=temperature,
+                    cache_key = build_icl_prompt_cache_key(
+                        tts_engine.icl_model_identities,
+                        icl_ref_audio,
+                        icl_ref_text,
+                        DEFAULT_LANGUAGE_ID,
                     )
+                    prompt = icl_prompt_cache.get(cache_key)
+                    cache_enabled = icl_prompt_cache.max_entries > 0
+                    if prompt is not None:
+                        print(f"ICL prompt cache hit: {icl_ref_audio}")
+                    else:
+                        print(f"ICL prompt cache miss: {icl_ref_audio}")
+                        prompt = tts_engine.prepare_icl_prompt(
+                            icl_ref_audio, icl_ref_text,
+                            temperature=temperature,
+                            language_id=DEFAULT_LANGUAGE_ID,
+                        )
+                        if cache_enabled:
+                            icl_prompt_cache.put(cache_key, prompt)
+                    try:
+                        return tts_engine.synthesize_with_icl_prompt(
+                            request.input, prompt,
+                            temperature=temperature,
+                            language_id=DEFAULT_LANGUAGE_ID,
+                        )
+                    finally:
+                        if not cache_enabled:
+                            prompt.close()
             loop = asyncio.get_event_loop()
             samples, sample_rate = await loop.run_in_executor(None, _do_icl)
             wav_data = pcm_float32_to_wav(samples, sample_rate)

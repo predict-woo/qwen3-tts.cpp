@@ -93,8 +93,20 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 | `QWEN3TTS_VOICES_DIR` | `../voices` | Path to speaker embedding JSON files |
 | `QWEN3TTS_LIB_PATH` | (auto-detect) | Explicit path to `libqwen3tts.{so,dylib}` |
 | `QWEN3TTS_THREADS` | `4` | Number of compute threads |
+| `QWEN3TTS_ICL_CACHE_SIZE` | `8` | Maximum prepared ICL prompt handles to keep for repeated reference-audio requests. Set `0` to disable. |
 | `QWEN3TTS_HOST` | `0.0.0.0` | Server bind address |
 | `QWEN3TTS_PORT` | `8000` | Server port |
+
+## Runtime Caches and Concurrency
+
+The server keeps two voice-related caches:
+
+- JSON speaker embeddings from `QWEN3TTS_VOICES_DIR` are loaded at startup and reused for `voice` requests backed by `.json` embedding files.
+- ICL requests that provide `reference_audio_path` and `reference_text` use a bounded prepared-prompt cache controlled by `QWEN3TTS_ICL_CACHE_SIZE`. Entries store the native prepared prompt handle: reference audio speaker embedding, reference Mimi codec tokens, reference transcript, and related prompt metadata. They do not cache generated speech.
+
+ICL cache keys include role-specific model file identities for the TTS model, speaker encoder, codec encoder, and tokenizer/vocoder decoder; the reference audio path, size, and mtime; a hash of `reference_text`; and the language id. Some roles may point at the same GGUF file today, but they are tracked separately so future split-model layouts invalidate correctly.
+
+All synthesis paths still run under one process-local synthesis lock because the C API is not request-thread-safe. The ICL cache reduces repeated reference preparation latency; it does not enable parallel synthesis.
 
 ## OpenAI SDK Compatibility
 

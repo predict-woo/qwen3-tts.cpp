@@ -10,6 +10,7 @@ extern "C" {
 
 /* Opaque handle */
 typedef struct Qwen3Tts Qwen3Tts;
+typedef struct Qwen3TtsIclPrompt Qwen3TtsIclPrompt;
 
 /* Generation parameters */
 typedef struct Qwen3TtsParams {
@@ -112,6 +113,26 @@ Qwen3TtsAudio* qwen3_tts_synthesize_icl_file(
     const char* reference_text,
     const Qwen3TtsParams* params);
 
+/* Prepare reusable in-context-learning prompt state from a reference WAV and
+ * transcript. Caller must free the returned handle with
+ * qwen3_tts_free_icl_prompt(). */
+Qwen3TtsIclPrompt* qwen3_tts_prepare_icl_prompt_file(
+    Qwen3Tts* tts,
+    const char* reference_audio_path,
+    const char* reference_text,
+    const Qwen3TtsParams* params);
+
+/* Synthesize using a prompt returned by qwen3_tts_prepare_icl_prompt_file().
+ * Returns NULL on failure. Caller must free with qwen3_tts_free_audio(). */
+Qwen3TtsAudio* qwen3_tts_synthesize_with_icl_prompt(
+    Qwen3Tts* tts,
+    const char* text,
+    const Qwen3TtsIclPrompt* prompt,
+    const Qwen3TtsParams* params);
+
+/* Free a prepared ICL prompt handle. */
+void qwen3_tts_free_icl_prompt(Qwen3TtsIclPrompt* prompt);
+
 /* Get last error message (or empty string) */
 const char* qwen3_tts_get_error(const Qwen3Tts* tts);
 
@@ -123,6 +144,14 @@ const char* qwen3_tts_model_type(const Qwen3Tts* tts);
 
 /* Returns the model size tag: "0b6", "1b7", etc. Empty on older GGUFs. */
 const char* qwen3_tts_model_size(const Qwen3Tts* tts);
+
+/* Resolved model paths used by each role that can affect prepared ICL output.
+ * Roles may currently point to the same GGUF path but are exposed separately
+ * for stable cache keys across future split-model layouts. */
+const char* qwen3_tts_tts_model_path(const Qwen3Tts* tts);
+const char* qwen3_tts_speaker_encoder_model_path(const Qwen3Tts* tts);
+const char* qwen3_tts_codec_encoder_model_path(const Qwen3Tts* tts);
+const char* qwen3_tts_tokenizer_decoder_model_path(const Qwen3Tts* tts);
 
 /* Returns 1 if the model ships an ECAPA-TDNN speaker encoder, else 0. */
 int qwen3_tts_has_speaker_encoder(const Qwen3Tts* tts);

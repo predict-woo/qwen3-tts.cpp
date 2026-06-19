@@ -4,6 +4,7 @@ import ctypes
 import ctypes.util
 import os
 import sys
+import weakref
 from pathlib import Path
 from typing import Optional
 
@@ -120,6 +121,24 @@ def _load_library() -> ctypes.CDLL:
     ]
     lib.qwen3_tts_synthesize_icl_file.restype = ctypes.POINTER(Qwen3TtsAudio)
 
+    # -- qwen3_tts_prepare_icl_prompt_file --
+    lib.qwen3_tts_prepare_icl_prompt_file.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p,
+        ctypes.POINTER(Qwen3TtsParams),
+    ]
+    lib.qwen3_tts_prepare_icl_prompt_file.restype = ctypes.c_void_p
+
+    # -- qwen3_tts_synthesize_with_icl_prompt --
+    lib.qwen3_tts_synthesize_with_icl_prompt.argtypes = [
+        ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p,
+        ctypes.POINTER(Qwen3TtsParams),
+    ]
+    lib.qwen3_tts_synthesize_with_icl_prompt.restype = ctypes.POINTER(Qwen3TtsAudio)
+
+    # -- qwen3_tts_free_icl_prompt --
+    lib.qwen3_tts_free_icl_prompt.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_free_icl_prompt.restype = None
+
     # -- qwen3_tts_sample_rate --
     lib.qwen3_tts_sample_rate.argtypes = [ctypes.c_void_p]
     lib.qwen3_tts_sample_rate.restype = ctypes.c_int32
@@ -142,6 +161,18 @@ def _load_library() -> ctypes.CDLL:
 
     lib.qwen3_tts_model_size.argtypes = [ctypes.c_void_p]
     lib.qwen3_tts_model_size.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_tts_model_path.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_tts_model_path.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_speaker_encoder_model_path.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_speaker_encoder_model_path.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_codec_encoder_model_path.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_codec_encoder_model_path.restype = ctypes.c_char_p
+
+    lib.qwen3_tts_tokenizer_decoder_model_path.argtypes = [ctypes.c_void_p]
+    lib.qwen3_tts_tokenizer_decoder_model_path.restype = ctypes.c_char_p
 
     lib.qwen3_tts_has_speaker_encoder.argtypes = [ctypes.c_void_p]
     lib.qwen3_tts_has_speaker_encoder.restype = ctypes.c_int
@@ -167,6 +198,34 @@ def _load_library() -> ctypes.CDLL:
 # ---------------------------------------------------------------------------
 # High-level wrapper
 # ---------------------------------------------------------------------------
+
+class _IclPromptHandle:
+    """Private owner for an opaque Qwen3TtsIclPrompt pointer."""
+
+    def __init__(self, lib: ctypes.CDLL, ptr):
+        if not ptr:
+            raise ValueError("null ICL prompt pointer")
+        self._lib = lib
+        self._ptr = ctypes.c_void_p(ptr)
+        self._finalizer = weakref.finalize(
+            self, _IclPromptHandle._free, self._lib, self._ptr
+        )
+
+    @staticmethod
+    def _free(lib: ctypes.CDLL, ptr: ctypes.c_void_p) -> None:
+        if ptr and ptr.value:
+            lib.qwen3_tts_free_icl_prompt(ptr)
+            ptr.value = None
+
+    def close(self) -> None:
+        self._finalizer()
+
+    @property
+    def _as_parameter_(self):
+        if not self._ptr or not self._ptr.value:
+            raise RuntimeError("ICL prompt handle is closed")
+        return self._ptr
+
 
 class QwenTTS:
     """High-level Python wrapper for the qwen3-tts C API."""
@@ -256,6 +315,16 @@ class QwenTTS:
         """True if the model ships an ECAPA-TDNN speaker encoder."""
         return bool(self._lib.qwen3_tts_has_speaker_encoder(self._handle))
 
+    @property
+    def icl_model_identities(self) -> dict[str, dict[str, object]]:
+        """Resolved role-specific model identities for ICL prompt cache keys."""
+        return {
+            "tts_model": self._model_file_identity(self._model_path("tts")),
+            "speaker_encoder_model": self._model_file_identity(self._model_path("speaker_encoder")),
+            "codec_encoder_model": self._model_file_identity(self._model_path("codec_encoder")),
+            "tokenizer_decoder_model": self._model_file_identity(self._model_path("tokenizer_decoder")),
+        }
+
     def list_speakers(self) -> list[dict]:
         """List preset voices baked into the model. Empty for Base variants.
 
@@ -329,6 +398,59 @@ class QwenTTS:
         )
         return self._extract_audio(audio_ptr)
 
+    def prepare_icl_prompt(
+        self,
+        reference_audio_path: str,
+        reference_text: str,
+        temperature: float = 0.9,
+        top_k: int = 50,
+        language_id: int = 2050,
+        max_audio_tokens: int = 2048,
+        repetition_penalty: float = 1.05,
+        n_threads: Optional[int] = None,
+    ) -> _IclPromptHandle:
+        """Prepare reusable ICL prompt state from reference audio and text."""
+        params = self._make_params(
+            temperature=temperature, top_k=top_k, language_id=language_id,
+            max_audio_tokens=max_audio_tokens, repetition_penalty=repetition_penalty,
+            n_threads=n_threads if n_threads is not None else self._n_threads,
+        )
+        ptr = self._lib.qwen3_tts_prepare_icl_prompt_file(
+            self._handle,
+            reference_audio_path.encode("utf-8"),
+            reference_text.encode("utf-8"),
+            ctypes.byref(params),
+        )
+        if not ptr:
+            err = self._get_error()
+            raise RuntimeError(f"Failed to prepare ICL prompt: {err}")
+        return _IclPromptHandle(self._lib, ptr)
+
+    def synthesize_with_icl_prompt(
+        self,
+        text: str,
+        prompt_handle: _IclPromptHandle,
+        temperature: float = 0.9,
+        top_k: int = 50,
+        language_id: int = 2050,
+        max_audio_tokens: int = 2048,
+        repetition_penalty: float = 1.05,
+        n_threads: Optional[int] = None,
+    ) -> tuple[list[float], int]:
+        """Synthesize with a prepared ICL prompt handle."""
+        params = self._make_params(
+            temperature=temperature, top_k=top_k, language_id=language_id,
+            max_audio_tokens=max_audio_tokens, repetition_penalty=repetition_penalty,
+            n_threads=n_threads if n_threads is not None else self._n_threads,
+        )
+        audio_ptr = self._lib.qwen3_tts_synthesize_with_icl_prompt(
+            self._handle,
+            text.encode("utf-8"),
+            prompt_handle,
+            ctypes.byref(params),
+        )
+        return self._extract_audio(audio_ptr)
+
     def close(self):
         """Destroy the engine and release resources."""
         if self._handle:
@@ -372,3 +494,23 @@ class QwenTTS:
     def _get_error(self) -> str:
         err = self._lib.qwen3_tts_get_error(self._handle)
         return err.decode("utf-8") if err else "unknown error"
+
+    def _model_path(self, role: str) -> str:
+        funcs = {
+            "tts": self._lib.qwen3_tts_tts_model_path,
+            "speaker_encoder": self._lib.qwen3_tts_speaker_encoder_model_path,
+            "codec_encoder": self._lib.qwen3_tts_codec_encoder_model_path,
+            "tokenizer_decoder": self._lib.qwen3_tts_tokenizer_decoder_model_path,
+        }
+        raw = funcs[role](self._handle)
+        return raw.decode("utf-8") if raw else ""
+
+    @staticmethod
+    def _model_file_identity(path: str) -> dict[str, object]:
+        resolved = Path(path).expanduser().resolve()
+        st = resolved.stat()
+        return {
+            "path": str(resolved),
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+        }

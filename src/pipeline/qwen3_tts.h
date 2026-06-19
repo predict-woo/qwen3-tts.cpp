@@ -100,6 +100,14 @@ struct tts_result {
 // Progress callback type
 using tts_progress_callback_t = std::function<void(int tokens_generated, int max_tokens)>;
 
+// Prepared prompt state for voice cloning / ICL reuse.
+struct icl_prompt {
+    std::vector<float> speaker_embedding;
+    std::vector<int32_t> ref_codes;
+    int32_t n_ref_frames = 0;
+    std::string ref_text;
+};
+
 // Main TTS class that orchestrates the full pipeline
 class Qwen3TTS {
 public:
@@ -135,6 +143,17 @@ public:
     tts_result synthesize_with_voice(const std::string & text,
                                       const float * ref_samples, int32_t n_ref_samples,
                                       const tts_params & params = tts_params());
+
+    // Prepare reusable voice cloning / ICL prompt state from reference audio.
+    bool prepare_icl_prompt(const std::string & reference_audio,
+                            const std::string & reference_text,
+                            const tts_params & params,
+                            icl_prompt & out);
+
+    // Generate speech using previously prepared prompt state.
+    tts_result synthesize_with_icl_prompt(const std::string & text,
+                                          const icl_prompt & prompt,
+                                          const tts_params & params = tts_params());
     
     // Extract speaker embedding from raw audio samples (for caching)
     // ref_samples: 24kHz mono float32 normalized to [-1, 1]
@@ -181,6 +200,9 @@ public:
     const std::string & get_error() const { return error_msg_; }
 
     const std::string & get_tts_model_path() const { return tts_model_path_; }
+    const std::string & get_speaker_encoder_model_path() const { return tts_model_path_; }
+    const std::string & get_codec_encoder_model_path() const { return decoder_model_path_; }
+    const std::string & get_tokenizer_decoder_model_path() const { return decoder_model_path_; }
     const std::string & get_decoder_model_path() const { return decoder_model_path_; }
 
     // Check if models are loaded
@@ -188,6 +210,17 @@ public:
     
 private:
     int32_t effective_n_threads(const tts_params & params) const;
+
+    bool prepare_icl_prompt_from_samples(const float * ref_samples,
+                                         int32_t n_ref_samples,
+                                         const std::string & reference_text,
+                                         const tts_params & params,
+                                         icl_prompt & out);
+
+    tts_result synthesize_with_icl_prompt_internal(const std::string & text,
+                                                  const icl_prompt & prompt,
+                                                  const tts_params & params,
+                                                  tts_result & result);
 
     tts_result synthesize_internal(const std::string & text,
                                    const float * speaker_embedding,
