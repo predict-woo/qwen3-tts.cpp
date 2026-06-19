@@ -263,7 +263,19 @@ Qwen3TtsAudio * qwen3_tts_synthesize_icl_file(
         const char * reference_audio_path,
         const char * reference_text,
         const Qwen3TtsParams * params) {
-    if (!tts || !text || !reference_audio_path || !reference_text) return nullptr;
+    if (!tts) return nullptr;
+    if (!text) {
+        tts->last_error = "Invalid argument: text is null";
+        return nullptr;
+    }
+    if (!reference_audio_path) {
+        tts->last_error = "Invalid argument: reference_audio_path is null";
+        return nullptr;
+    }
+    if (!reference_text) {
+        tts->last_error = "Invalid argument: reference_text is null";
+        return nullptr;
+    }
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
     if (cpp_params.n_threads > 0) {
@@ -284,7 +296,15 @@ Qwen3TtsIclPrompt * qwen3_tts_prepare_icl_prompt_file(
         const char * reference_audio_path,
         const char * reference_text,
         const Qwen3TtsParams * params) {
-    if (!tts || !reference_audio_path || !reference_text) return nullptr;
+    if (!tts) return nullptr;
+    if (!reference_audio_path) {
+        tts->last_error = "Invalid argument: reference_audio_path is null";
+        return nullptr;
+    }
+    if (!reference_text) {
+        tts->last_error = "Invalid argument: reference_text is null";
+        return nullptr;
+    }
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
     if (cpp_params.n_threads > 0) {
@@ -305,7 +325,15 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_icl_prompt(
         const char * text,
         const Qwen3TtsIclPrompt * prompt,
         const Qwen3TtsParams * params) {
-    if (!tts || !text || !prompt) return nullptr;
+    if (!tts) return nullptr;
+    if (!text) {
+        tts->last_error = "Invalid argument: text is null";
+        return nullptr;
+    }
+    if (!prompt) {
+        tts->last_error = "Invalid argument: prompt is null";
+        return nullptr;
+    }
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
     if (cpp_params.n_threads > 0) {

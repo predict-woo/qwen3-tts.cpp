@@ -72,10 +72,11 @@ async def lifespan(app: FastAPI):
     print(f"ICL prompt cache size: {icl_prompt_cache.max_entries}")
     print(f"Ready. {len(voice_embeddings)} JSON voice(s), {len(presets)} model preset(s).")
     yield
-    icl_prompt_cache.clear()
-    if tts_engine:
-        tts_engine.close()
-        tts_engine = None
+    with _synthesis_lock:
+        icl_prompt_cache.clear()
+        if tts_engine:
+            tts_engine.close()
+            tts_engine = None
 
 
 def _resolve_voice(voice: str):

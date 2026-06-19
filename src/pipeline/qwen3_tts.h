@@ -105,6 +105,8 @@ struct icl_prompt {
     std::vector<float> speaker_embedding;
     std::vector<int32_t> ref_codes;
     int32_t n_ref_frames = 0;
+    int32_t expected_hidden_size = 0;
+    int32_t expected_n_codebooks = 0;
     std::string ref_text;
 };
 
