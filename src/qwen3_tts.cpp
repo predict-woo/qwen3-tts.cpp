@@ -11,6 +11,9 @@
 
 #ifdef __APPLE__
 #include <mach/mach.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <psapi.h>
 #else
 #include <sys/resource.h>
 #endif
@@ -45,6 +48,14 @@ static bool get_process_memory_snapshot(process_memory_snapshot & out) {
     } else {
         out.phys_footprint_bytes = out.rss_bytes;
     }
+    return true;
+#elif defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS stats = {};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &stats, sizeof(stats)) == 0) {
+        return false;
+    }
+    out.rss_bytes = (uint64_t) stats.WorkingSetSize;
+    out.phys_footprint_bytes = (uint64_t) stats.PeakWorkingSetSize;
     return true;
 #else
     struct rusage usage = {};

@@ -27,6 +27,10 @@ if(APPLE AND QWEN3_TTS_COREML)
     enable_language(OBJCXX)
 endif()
 
+if(WIN32)
+    add_compile_definitions(_USE_MATH_DEFINES NOMINMAX)
+endif()
+
 # Find threads
 find_package(Threads REQUIRED)
 
@@ -165,6 +169,9 @@ target_link_libraries(qwen3_tts PUBLIC
     audio_tokenizer_decoder
     Threads::Threads
 )
+if(WIN32)
+    target_link_libraries(qwen3_tts PUBLIC psapi)
+endif()
 
 # Shared library with C API (for Nim FFI)
 add_library(qwen3tts_shared SHARED
