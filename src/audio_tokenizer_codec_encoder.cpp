@@ -60,9 +60,10 @@ static void host_conv1d(
                 for (int32_t k = 0; k < K; k++) {
                     int32_t input_pos = ow * stride + k * dilation;
                     if (input_pos >= 0 && input_pos < T) {
-                        // weight layout: [K, IC, OC] → w[k*IC*OC + ic*OC + oc]
+                        // GGML weight layout: ne=[K, IC, OC] → memory [OC, IC, K]
+                        // float_index(k, ic, oc) = oc * IC * K + ic * K + k
                         // input layout: [T, IC] → inp[input_pos*IC + ic]
-                        sum += weight[k * IC * OC + ic * OC + oc] * input[input_pos * IC + ic];
+                        sum += weight[oc * IC * K + ic * K + k] * input[input_pos * IC + ic];
                     }
                 }
             }
