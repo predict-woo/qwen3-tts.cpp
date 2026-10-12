@@ -5,6 +5,7 @@
 #include "gguf.h"
 #include "coreml_code_predictor.h"
 
+#include <functional>
 #include <string>
 #include <map>
 #include <vector>
@@ -272,6 +273,10 @@ public:
     // speaker_embd: speaker embedding [hidden_size]
     // max_len: maximum number of frames to generate
     // output: generated speech codes [n_frames, n_codebooks]
+    // Per-frame callback during generation: (frame_codes, n_codebooks,
+    // frame_index). Return false to abort generation (user stop).
+    using FrameCallback = std::function<bool(const int32_t *, int32_t, int32_t)>;
+
     bool generate(const int32_t * text_tokens, int32_t n_tokens,
                   const float * speaker_embd, int32_t max_len,
                   std::vector<int32_t> & output,
@@ -283,7 +288,8 @@ public:
                   int32_t n_instruct = 0,
                   float eos_bias = 0.0f,
                   int32_t target_frames = 0,
-                  bool rep_loop_detect = false);
+                  bool rep_loop_detect = false,
+                  const FrameCallback & on_frame = nullptr);
 
     /// Generate speech codes with in-context voice cloning.
     /// ref_codec_tokens: [n_ref_frames × 16] from the codec encoder.
@@ -301,7 +307,8 @@ public:
                       int32_t top_k = 50,
                       float eos_bias = 0.0f,
                       int32_t target_frames = 0,
-                      bool rep_loop_detect = true);
+                      bool rep_loop_detect = true,
+                      const FrameCallback & on_frame = nullptr);
     
     const tts_transformer_config & get_config() const { return model_.config; }
     

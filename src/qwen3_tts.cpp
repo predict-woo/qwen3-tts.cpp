@@ -212,6 +212,68 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     return true;
 }
 
+
+// ── Streaming decode driver ──────────────────────────────────────────
+// Feeds generated codec frames to the vocoder in windows: every
+// STREAM_CHUNK_FRAMES new frames, decode_window() runs with warmup
+// context and only the NEW samples are delivered. In ICL mode delivery
+// starts after the reference-echo boundary (echo frames are still
+// decoded as context, never delivered).
+namespace {
+int stream_chunk_frames() {
+    static const int v = [] {
+        if (const char * e = getenv("QWEN3_TTS_STREAM_CHUNK_FRAMES")) {
+            int n = atoi(e);
+            if (n >= 4) return n;
+        }
+        return 25;  // 2 s of audio per chunk at 12.5 fps
+    }();
+    return v;
+}
+}  // namespace
+
+struct StreamDecoderDriver {
+    AudioTokenizerDecoder & decoder;
+    // null = collect-only (non-streaming callers never dereference)
+    const Qwen3TTS::StreamingAudioCallback * on_audio;
+    int32_t emitted = 0;          // frames whose audio has been delivered
+    int32_t deliver_from = 0;     // first frame to deliver (ICL echo boundary)
+    bool aborted = false;
+    bool failed = false;
+    int chunks = 0;
+    std::vector<float> audio;     // everything delivered (also the result)
+
+    bool deliver(std::vector<float> && new_samples) {
+        if (new_samples.empty()) return true;
+        audio.insert(audio.end(), new_samples.begin(), new_samples.end());
+        ++chunks;
+        if (on_audio) {
+            return (*on_audio)(new_samples.data(), new_samples.size());
+        }
+        return true;
+    }
+
+    bool on_frame(const int32_t * codes_total, int32_t n_frames) {
+        if (aborted || failed) return false;
+        if (n_frames - emitted < stream_chunk_frames()) return true;
+        // hold chunks that fall entirely inside the non-delivered prefix
+        if (n_frames <= deliver_from) return true;
+        std::vector<float> new_samples;
+        int32_t start = emitted > deliver_from ? emitted : deliver_from;
+        if (!decoder.decode_window(codes_total, n_frames, start, n_frames,
+                                   12, new_samples)) {
+            failed = true;
+            return false;
+        }
+        emitted = n_frames;
+        if (!deliver(std::move(new_samples))) {
+            aborted = true;
+            return false;
+        }
+        return true;
+    }
+};
+
 tts_result Qwen3TTS::synthesize(const std::string & text,
                                  const tts_params & params) {
     tts_result result;
@@ -230,9 +292,10 @@ tts_result Qwen3TTS::synthesize(const std::string & text,
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const std::string & reference_audio,
-                                            const tts_params & params) {
+                                            const tts_params & params,
+                                            const StreamingAudioCallback & on_audio) {
     tts_result result;
-    
+
     std::vector<float> ref_samples;
     int ref_sample_rate;
     if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
@@ -248,12 +311,13 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         ref_samples = std::move(resampled);
     }
     
-    return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), params);
+    return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), params, on_audio);
 }
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const float * ref_samples, int32_t n_ref_samples,
-                                            const tts_params & params) {
+                                            const tts_params & params,
+                                            const StreamingAudioCallback & on_audio) {
     tts_result result;
     
     if (!models_loaded_) {
@@ -291,8 +355,9 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
     if (params.print_progress) {
         fprintf(stderr, "Speaker embedding extracted: %zu floats\n", speaker_embedding.size());
     }
-    
-    return synthesize_internal(text, speaker_embedding.data(), params, result);
+
+    return synthesize_internal(text, speaker_embedding.data(), params, result,
+                               "", on_audio ? &on_audio : nullptr);
 }
 
 bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_ref_samples,
@@ -365,7 +430,9 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
                                           const float * speaker_embedding,
                                           const tts_params & params,
                                           tts_result & result,
-                                          const std::string & instruct) {
+                                          const std::string & instruct,
+                                          const StreamingAudioCallback * stream_cb) {
+    const int64_t t_total_start_stream = get_time_ms();
     int64_t t_total_start = get_time_ms();
     auto sample_memory = [&](const char * stage) {
         process_memory_snapshot mem;
@@ -432,6 +499,32 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     transformer_.clear_kv_cache();
     
     std::vector<int32_t> speech_codes;
+    // Stream driver is safe to construct unconditionally: it stores the
+    // callback as a pointer and deliver() is a no-op sink when it is null
+    // (non-streaming calls never dereference it).
+    StreamDecoderDriver stream_driver{audio_decoder_, stream_cb, 0, 0, false, false, 0};
+    int64_t t_stream_start = 0;
+    const bool streaming = (stream_cb != nullptr);
+    if (streaming) {
+        // vocoder must be resident before generation starts
+        if (!decoder_loaded_) {
+            if (!audio_decoder_.load_model(decoder_model_path_)) {
+                result.error_msg = "Failed to load vocoder: " + audio_decoder_.get_error();
+                return result;
+            }
+            decoder_loaded_ = true;
+        }
+        t_stream_start = get_time_ms();
+    }
+    (void)t_stream_start;
+    const auto frame_cb = streaming ? std::function<bool(const int32_t *, int32_t, int32_t)>(
+        [&](const int32_t *, int32_t, int32_t n_frames_cum) {
+            // frame_codes are already in speech_codes
+            return stream_driver.on_frame(
+                speech_codes.data(),
+                n_frames_cum + 1);
+        })
+      : nullptr;
     if (!instruct.empty()) {
         // Voice design: instruct user-turn prepended, no speaker embedding
         // (Python generate_voice_design: instruct_ids + speaker_embed=None)
@@ -455,15 +548,54 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
                                    params.language_id, params.repetition_penalty,
                                    params.temperature, params.top_k,
                                    instruct_tokens.data(), (int32_t)instruct_tokens.size(),
-                                   params.eos_bias, target_frames)) {
+                                   params.eos_bias, target_frames,
+                                   /*rep_loop_detect=*/false,
+                                   frame_cb)) {
             result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
             return result;
         }
     } else if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
                                speaker_embedding, params.max_audio_tokens, speech_codes,
                                params.language_id, params.repetition_penalty,
-                               params.temperature, params.top_k)) {
+                               params.temperature, params.top_k,
+                               /*instruct_tokens=*/nullptr, /*n_instruct=*/0,
+                               /*eos_bias=*/0.0f, /*target_frames=*/0,
+                               /*rep_loop_detect=*/false,
+                               frame_cb)) {
         result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
+        return result;
+    }
+    if (streaming) {
+        if (stream_driver.failed) {
+            result.error_msg = "Streaming decode failed: " + audio_decoder_.get_error();
+            return result;
+        }
+        // flush the tail
+        int32_t ncb = transformer_.get_config().n_codebooks;
+        int32_t total_frames = (int32_t)speech_codes.size() / ncb;
+        std::vector<float> tail;
+        if (total_frames > stream_driver.emitted) {
+            if (!audio_decoder_.decode_window(speech_codes.data(), total_frames,
+                                              stream_driver.emitted, total_frames, 12, tail)) {
+                result.error_msg = "Streaming tail decode failed: " + audio_decoder_.get_error();
+                return result;
+            }
+            if (!tail.empty()) {
+                // deliver() appends to stream_driver.audio (the returned
+                // result) AND forwards to the callback — the tail must
+                // reach both, unlike a bare on_audio() call
+                stream_driver.deliver(std::move(tail));
+            }
+        }
+        result.audio = std::move(stream_driver.audio);
+        result.sample_rate = audio_decoder_.get_config().sample_rate;
+        result.success = true;
+        result.t_generate_ms = get_time_ms() - t_generate_start;
+        result.t_total_ms = get_time_ms() - t_total_start_stream;
+        if (params.print_progress) {
+            fprintf(stderr, "Streamed %d chunks, %zu samples\n",
+                    stream_driver.chunks, result.audio.size());
+        }
         return result;
     }
     result.t_generate_ms = get_time_ms() - t_generate_start;
@@ -755,23 +887,27 @@ bool save_audio_file(const std::string & path, const std::vector<float> & sample
 }
 
 
-tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
-                                             const std::string & reference_audio,
-                                             const std::string & reference_text,
-                                             const tts_params & params) {
-    tts_result result;
+bool Qwen3TTS::prepare_icl_context(const std::string & reference_audio,
+                                    const std::string & reference_text,
+                                    std::vector<int32_t> & ref_codec_tokens,
+                                    int32_t & n_ref_frames,
+                                    std::vector<float> & speaker_embedding,
+                                    std::string & error_out,
+                                    const tts_params & params) {
+
+    
 
     if (!models_loaded_) {
-        result.error_msg = "Models not loaded";
-        return result;
+        error_out = "Models not loaded";
+        return false;
     }
 
     // Load reference audio
     std::vector<float> ref_samples;
     int ref_sample_rate;
     if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
-        result.error_msg = "Failed to load reference audio: " + reference_audio;
-        return result;
+        error_out = "Failed to load reference audio: " + reference_audio;
+        return false;
     }
     const int target_rate = 24000;
     if (ref_sample_rate != target_rate) {
@@ -783,19 +919,15 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
     // Extract speaker embedding (same as x-vector mode)
     if (!encoder_loaded_) {
         if (!audio_encoder_.load_model(tts_model_path_)) {
-            result.error_msg = "Failed to load speaker encoder: " + audio_encoder_.get_error();
-            return result;
+            error_out = "Failed to load speaker encoder: " + audio_encoder_.get_error();
+            return false;
         }
         encoder_loaded_ = true;
     }
-    std::vector<float> speaker_embedding;
     if (!audio_encoder_.encode(ref_samples.data(), (int32_t)ref_samples.size(), speaker_embedding)) {
-        result.error_msg = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
-        return result;
+        error_out = "Failed to extract speaker embedding: " + audio_encoder_.get_error();
+        return false;
     }
-
-    std::vector<int32_t> ref_codec_tokens;
-    int32_t n_ref_frames = 0;
 
     // Check for pre-computed codec tokens (exact Python encoder output)
     // This bypasses the C++ encoder's F16 precision loss entirely.
@@ -807,8 +939,8 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
     if (!ref_code_path.empty()) {
         FILE * f = fopen(ref_code_path.c_str(), "r");
         if (!f) {
-            result.error_msg = "ref-code file not readable: " + ref_code_path;
-            return result;
+            error_out = "ref-code file not readable: " + ref_code_path;
+            return false;
         }
         int val;
         while (fscanf(f, "%d", &val) == 1) {
@@ -818,13 +950,13 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
         const bool has_trailing_garbage = (fscanf(f, " %c", &junk) == 1);
         fclose(f);
         if (has_trailing_garbage) {
-            result.error_msg = "ref-code file malformed (trailing non-numeric data): " + ref_code_path;
-            return result;
+            error_out = "ref-code file malformed (trailing non-numeric data): " + ref_code_path;
+            return false;
         }
         if (ref_codec_tokens.empty() || ref_codec_tokens.size() % 16 != 0) {
-            result.error_msg = "ref-code file malformed (expected whitespace-separated "
+            error_out = "ref-code file malformed (expected whitespace-separated "
                                "integers, a multiple of 16): " + ref_code_path;
-            return result;
+            return false;
         }
         n_ref_frames = (int32_t)ref_codec_tokens.size() / 16;
         loaded_precomputed = true;
@@ -840,15 +972,15 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
         if (!codec_encoder_loaded_) {
             // The codec encoder loads from the same tokenizer GGUF as the decoder
             if (!codec_encoder_.load(decoder_model_path_)) {
-                result.error_msg = "Failed to load codec encoder: " + std::string(codec_encoder_.get_error());
-                return result;
+                error_out = "Failed to load codec encoder: " + std::string(codec_encoder_.get_error());
+                return false;
             }
             codec_encoder_loaded_ = true;
         }
         if (!codec_encoder_.encode(ref_samples.data(), (int32_t)ref_samples.size(),
                                     ref_codec_tokens, n_ref_frames)) {
-            result.error_msg = "Failed to encode reference audio: " + std::string(codec_encoder_.get_error());
-            return result;
+            error_out = "Failed to encode reference audio: " + std::string(codec_encoder_.get_error());
+            return false;
         }
     }
 
@@ -856,12 +988,58 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
         fprintf(stderr, "ICL: %d codec frames from %zu samples (%.1fs)\n",
                 n_ref_frames, ref_samples.size(),
                 (float)ref_samples.size() / target_rate);
-        fprintf(stderr, "ICL: reference text: %zu chars\n", reference_text.size());
     }
+    return true;
+}
 
+tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
+                                             const std::string & reference_audio,
+                                             const std::string & reference_text,
+                                             const tts_params & params) {
+    tts_result result;
+    std::vector<int32_t> ref_codec_tokens;
+    int32_t n_ref_frames = 0;
+    std::vector<float> speaker_embedding;
+    std::string prep_err;
+    if (!prepare_icl_context(reference_audio, reference_text, ref_codec_tokens,
+                             n_ref_frames, speaker_embedding, prep_err, params)) {
+        result.error_msg = prep_err;
+        return result;
+    }
     return synthesize_icl_internal(text, speaker_embedding.data(),
-                                    ref_codec_tokens.data(), n_ref_frames,
-                                    reference_text, params, result);
+                                   ref_codec_tokens.data(), n_ref_frames,
+                                   reference_text, params, result);
+}
+
+tts_result Qwen3TTS::synthesize_streaming(const std::string & text,
+                                          const tts_params & params,
+                                          const StreamingAudioCallback & on_audio) {
+    tts_result result;
+    if (!models_loaded_) {
+        result.error_msg = "Models not loaded";
+        return result;
+    }
+    return synthesize_internal(text, nullptr, params, result, "", &on_audio);
+}
+
+tts_result Qwen3TTS::synthesize_in_context_streaming(const std::string & text,
+                                                      const std::string & reference_audio,
+                                                      const std::string & reference_text,
+                                                      const tts_params & params,
+                                                      const StreamingAudioCallback & on_audio) {
+    tts_result result;
+    std::vector<int32_t> ref_codec_tokens;
+    int32_t n_ref_frames = 0;
+    std::vector<float> speaker_embedding;
+    std::string prep_err;
+    if (!prepare_icl_context(reference_audio, reference_text, ref_codec_tokens,
+                             n_ref_frames, speaker_embedding, prep_err, params)) {
+        result.error_msg = prep_err;
+        return result;
+    }
+    return synthesize_icl_internal(text, speaker_embedding.data(),
+                                   ref_codec_tokens.data(), n_ref_frames,
+                                   reference_text, params, result, &on_audio);
 }
 
 tts_result Qwen3TTS::synthesize_icl_internal(const std::string & text,
@@ -870,8 +1048,9 @@ tts_result Qwen3TTS::synthesize_icl_internal(const std::string & text,
                                                int32_t n_ref_frames,
                                                const std::string & reference_text,
                                                const tts_params & params,
-                                               tts_result & result) {
-    int64_t t_total_start = get_time_ms();
+                                               tts_result & result,
+                                               const StreamingAudioCallback * stream_cb) {
+    const int64_t t_total_start = get_time_ms();
 
     // Step 1: Tokenize target text
     std::vector<int32_t> text_tokens = tokenizer_.encode_for_tts(text);
@@ -917,6 +1096,74 @@ tts_result Qwen3TTS::synthesize_icl_internal(const std::string & text,
         : 0.8;
     int64_t expected_frames = (int64_t)((double)text.size() * ref_char_rate);
     if (expected_frames < 8) expected_frames = 8;
+    const bool streaming = (stream_cb != nullptr);
+    if (streaming) {
+        // vocoder must be resident before generation starts
+        if (!decoder_loaded_) {
+            if (!audio_decoder_.load_model(decoder_model_path_)) {
+                result.error_msg = "Failed to load vocoder: " + audio_decoder_.get_error();
+                return result;
+            }
+            decoder_loaded_ = true;
+        }
+        // Single attempt: delivered audio cannot be retracted for a retry.
+        // Delivery starts past the reference echo (+2 frame margin for the
+        // transition); the echo frames still serve as decode warmup.
+        // Decode with the reference codes prepended as context (as the
+        // non-streaming path does): codes_total = [ref frames | generated].
+        // deliver_from indexes this combined buffer — the reference echo
+        // occupies the first n_ref_frames frames (+2 transition margin),
+        // so delivery starts at generated frame 0. speech_codes alone
+        // holds only generated frames; indexing it with n_ref_frames + 2
+        // skipped the first target frames entirely.
+        std::vector<int32_t> codes_total(ref_codec_tokens,
+                                         ref_codec_tokens + (size_t)n_ref_frames * n_codebooks_cfg);
+        StreamDecoderDriver driver{audio_decoder_, stream_cb, 0,
+                                   n_ref_frames + 2, false, false, 0};
+        const int32_t stream_cap = (int32_t)(expected_frames * 3);  // hard babble cap
+        if (!transformer_.generate_icl(
+                text_tokens.data(), (int32_t)text_tokens.size(),
+                ref_text_tokens.data(), (int32_t)ref_text_tokens.size(),
+                ref_codec_tokens, n_ref_frames,
+                speaker_embedding, stream_cap, speech_codes,
+                params.language_id, params.repetition_penalty,
+                params.temperature, params.top_k, params.eos_bias,
+                (int32_t)(expected_frames * 5 / 4),
+                /*rep_loop_detect=*/true,
+                [&](const int32_t *, int32_t, int32_t frame_idx) {
+                    codes_total.insert(codes_total.end(),
+                                       speech_codes.begin() + (size_t)frame_idx * n_codebooks_cfg,
+                                       speech_codes.begin() + (size_t)(frame_idx + 1) * n_codebooks_cfg);
+                    return driver.on_frame(codes_total.data(), n_ref_frames + frame_idx + 1);
+                })) {
+            result.error_msg = "Failed to generate speech codes (ICL): " + transformer_.get_error();
+            return result;
+        }
+        if (driver.failed) {
+            result.error_msg = "Streaming decode failed: " + audio_decoder_.get_error();
+            return result;
+        }
+        const int32_t total = n_ref_frames + (int32_t)speech_codes.size() / (int32_t)n_codebooks_cfg;
+        std::vector<float> tail;
+        if (total > driver.emitted && total > driver.deliver_from) {
+            if (!audio_decoder_.decode_window(codes_total.data(), total,
+                                              driver.emitted, total, 12, tail)) {
+                result.error_msg = "Streaming tail decode failed: " + audio_decoder_.get_error();
+                return result;
+            }
+            (void)driver.deliver(std::move(tail));
+        }
+        result.audio = std::move(driver.audio);
+        result.sample_rate = audio_decoder_.get_config().sample_rate;
+        result.success = true;
+        result.t_generate_ms = get_time_ms() - t_generate_start;
+        result.t_total_ms = get_time_ms() - t_total_start;
+        if (params.print_progress) {
+            fprintf(stderr, "ICL streamed %d chunks, %zu samples\n",
+                    driver.chunks, result.audio.size());
+        }
+        return result;
+    }
     bool gen_clean = false;
     std::vector<int32_t> best_codes;
     int64_t best_delta = INT64_MAX;

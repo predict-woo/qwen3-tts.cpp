@@ -89,6 +89,10 @@ using tts_progress_callback_t = std::function<void(int tokens_generated, int max
 // Main TTS class that orchestrates the full pipeline
 class Qwen3TTS {
 public:
+    /// Audio chunk callback for streaming synthesis. Return false to stop.
+    using StreamingAudioCallback = std::function<bool(const float * samples, size_t n_samples)>;
+
+
     Qwen3TTS();
     ~Qwen3TTS();
     
@@ -106,18 +110,22 @@ public:
     // text: input text to synthesize
     // reference_audio: path to reference audio file (WAV, 24kHz)
     // params: generation parameters
+    // on_audio: optional streaming callback (progressive delivery)
     tts_result synthesize_with_voice(const std::string & text,
                                       const std::string & reference_audio,
-                                      const tts_params & params = tts_params());
+                                      const tts_params & params = tts_params(),
+                                      const StreamingAudioCallback & on_audio = nullptr);
     
     // Generate speech with voice cloning from samples
     // text: input text to synthesize
     // ref_samples: reference audio samples (24kHz, mono, normalized to [-1, 1])
     // n_ref_samples: number of reference samples
     // params: generation parameters
+    // on_audio: optional streaming callback (progressive delivery)
     tts_result synthesize_with_voice(const std::string & text,
                                       const float * ref_samples, int32_t n_ref_samples,
-                                      const tts_params & params = tts_params());
+                                      const tts_params & params = tts_params(),
+                                      const StreamingAudioCallback & on_audio = nullptr);
     
     // Extract speaker embedding from raw audio samples (for caching)
     // ref_samples: 24kHz mono float32 normalized to [-1, 1]
@@ -152,6 +160,26 @@ public:
                                         const std::string & instruct,
                                         const tts_params & params = tts_params());
 
+    /// Streaming synthesis: audio chunks are delivered through `on_audio`
+    /// as they are produced (first chunk after ~STREAM_CHUNK_FRAMES
+    /// generated frames). Return false from the callback to stop
+    /// generation early. The full audio is also returned in the result.
+    /// Streaming trades the ICL retry/babble mitigation for latency:
+    /// single attempt, no post-hoc audio cutting — utterances are capped
+    /// by max_audio_tokens (plain) / the duration prior (ICL).
+    tts_result synthesize_streaming(const std::string & text,
+                                     const tts_params & params,
+                                     const StreamingAudioCallback & on_audio);
+
+    /// Streaming ICL synthesis. Delivery starts after the reference-echo
+    /// boundary (the model first reproduces the reference; that audio is
+    /// not delivered — the echo frames still serve as decode context).
+    tts_result synthesize_in_context_streaming(const std::string & text,
+                                                const std::string & reference_audio,
+                                                const std::string & reference_text,
+                                                const tts_params & params,
+                                                const StreamingAudioCallback & on_audio);
+
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
     
@@ -166,7 +194,16 @@ private:
                                    const float * speaker_embedding,
                                    const tts_params & params,
                                    tts_result & result,
-                                   const std::string & instruct = "");
+                                   const std::string & instruct = "",
+                                   const StreamingAudioCallback * stream_cb = nullptr);
+
+    bool prepare_icl_context(const std::string & reference_audio,
+                             const std::string & reference_text,
+                             std::vector<int32_t> & ref_codec_tokens,
+                             int32_t & n_ref_frames,
+                             std::vector<float> & speaker_embedding,
+                             std::string & error_out,
+                             const tts_params & params);
 
     tts_result synthesize_icl_internal(const std::string & text,
                                         const float * speaker_embedding,
@@ -174,7 +211,8 @@ private:
                                         int32_t n_ref_frames,
                                         const std::string & reference_text,
                                         const tts_params & params,
-                                        tts_result & result);
+                                        tts_result & result,
+                                        const StreamingAudioCallback * stream_cb = nullptr);
     
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;

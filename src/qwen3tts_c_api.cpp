@@ -119,6 +119,10 @@ int qwen3_tts_is_loaded(const Qwen3Tts * tts) {
     return (tts && tts->engine.is_loaded()) ? 1 : 0;
 }
 
+typedef int (*qwen3_tts_stream_callback)(const float * samples,
+                                         int32_t n_samples,
+                                         void * user_data);
+
 Qwen3TtsAudio * qwen3_tts_synthesize(
         Qwen3Tts * tts, const char * text,
         const Qwen3TtsParams * params) {
@@ -126,6 +130,45 @@ Qwen3TtsAudio * qwen3_tts_synthesize(
     AUTORELEASE_BEGIN
     auto cpp_params = to_cpp_params(params);
     auto result = tts->engine.synthesize(text, cpp_params);
+    if (!result.success) {
+        tts->last_error = result.error_msg;
+    }
+    auto * out = to_c_audio(result);
+    AUTORELEASE_END
+    return out;
+}
+
+Qwen3TtsAudio * qwen3_tts_synthesize_streaming(
+        Qwen3Tts * tts, const Qwen3TtsParams * params, const char * text,
+        qwen3_tts_stream_callback callback, void * user_data) {
+    if (!tts || !text || !callback) return nullptr;
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    auto result = tts->engine.synthesize_streaming(
+        text, cpp_params,
+        [&](const float * samples, size_t n) -> bool {
+            return callback(samples, (int32_t)n, user_data) != 0;
+        });
+    if (!result.success) {
+        tts->last_error = result.error_msg;
+    }
+    auto * out = to_c_audio(result);
+    AUTORELEASE_END
+    return out;
+}
+
+Qwen3TtsAudio * qwen3_tts_synthesize_in_context_streaming(
+        Qwen3Tts * tts, const Qwen3TtsParams * params, const char * text,
+        const char * reference_audio_path, const char * reference_text,
+        qwen3_tts_stream_callback callback, void * user_data) {
+    if (!tts || !text || !reference_audio_path || !reference_text || !callback) return nullptr;
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    auto result = tts->engine.synthesize_in_context_streaming(
+        text, reference_audio_path, reference_text, cpp_params,
+        [&](const float * samples, size_t n) -> bool {
+            return callback(samples, (int32_t)n, user_data) != 0;
+        });
     if (!result.success) {
         tts->last_error = result.error_msg;
     }
