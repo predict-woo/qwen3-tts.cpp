@@ -20,6 +20,7 @@ test_output/
 test_results.txt
 *.wav
 !examples/readme_clone_input.wav
+!tests/data/*.wav
 !examples/readme_example_clone.wav
 tmp*.mlpackage/
 third_party/
