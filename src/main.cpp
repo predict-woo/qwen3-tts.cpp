@@ -1,6 +1,7 @@
 #include "qwen3_tts.h"
 
 #include <cstdio>
+#include <chrono>
 #include <cstring>
 #include <string>
 
@@ -36,12 +37,27 @@ void print_usage(const char * program) {
     fprintf(stderr, "  %s -m ./models -t \"Hi\" -r ref.wav --ref-text \"Transcript\" -o icl.wav\n", program);
 }
 
+// --stream demo callback: reports chunk arrivals + first-chunk latency
+static bool stream_cli_callback(const float * samples, size_t n) {
+    static int64_t t0 = 0;
+    static int chunk = 0;
+    auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    if (t0 == 0) t0 = now_ms();
+    fprintf(stderr, "[stream] chunk %d: %zu samples (%.2fs audio) at +%.2fs\n",
+            ++chunk, n, (double)n / 24000.0, (double)(now_ms() - t0) / 1000.0);
+    return true;
+}
+
 int main(int argc, char ** argv) {
     std::string model_dir;
     std::string text;
     std::string output_file = "output.wav";
     std::string reference_audio;
     std::string ref_text;
+    bool stream_mode = false;
     std::string ref_code_file;  // pre-computed codec tokens (bypasses C++ encoder)
     
     qwen3_tts::tts_params params;
@@ -71,6 +87,8 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             output_file = argv[i];
+        } else if (arg == "--stream") {
+            stream_mode = true;
         } else if (arg == "-r" || arg == "--reference") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing reference audio\n");
@@ -195,16 +213,22 @@ int main(int argc, char ** argv) {
 
     if (reference_audio.empty()) {
         fprintf(stderr, "Synthesizing: \"%s\"\n", text.c_str());
-        result = tts.synthesize(text, params);
+        result = stream_mode
+            ? tts.synthesize_streaming(text, params, stream_cli_callback)
+            : tts.synthesize(text, params);
     } else {
         fprintf(stderr, "Synthesizing with voice cloning: \"%s\"\n", text.c_str());
         fprintf(stderr, "Reference audio: %s\n", reference_audio.c_str());
         if (!ref_text.empty()) {
             params.ref_code_path = ref_code_file;
             fprintf(stderr, "ICL mode with transcript: %zu chars\n", ref_text.size());
-            result = tts.synthesize_in_context(text, reference_audio, ref_text, params);
+            result = stream_mode
+                ? tts.synthesize_in_context_streaming(text, reference_audio, ref_text, params, stream_cli_callback)
+                : tts.synthesize_in_context(text, reference_audio, ref_text, params);
         } else {
-            result = tts.synthesize_with_voice(text, reference_audio, params);
+            result = stream_mode
+                ? tts.synthesize_streaming(text, params, stream_cli_callback)
+                : tts.synthesize_with_voice(text, reference_audio, params);
         }
     }
     

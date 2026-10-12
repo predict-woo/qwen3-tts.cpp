@@ -2922,7 +2922,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                float repetition_penalty,
                                float temperature,
                                int32_t top_k,
-                               bool rep_loop_detect) {
+                               bool rep_loop_detect,
+                               const FrameCallback & on_frame) {
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};
@@ -3094,6 +3095,10 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
             output.push_back(frame_codes[cb]);
         }
 
+        if (on_frame && !on_frame(frame_codes.data(), cfg.n_codebooks, frame)) {
+            break;  // user abort — keep what was generated
+        }
+
         // Repetition-loop detection: babble tails ("lack lack lack") cycle
         // near-identical 16-codebook frames with sampling jitter. A frame is
         // "repetitive" when >= 10/16 codes match a frame 1-6 back (periods up
@@ -3259,7 +3264,8 @@ bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
                                    int32_t top_k,
                                    float eos_bias,
                                    int32_t target_frames,
-                                   bool rep_loop_detect) {
+                                   bool rep_loop_detect,
+                                   const FrameCallback & on_frame) {
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -3423,6 +3429,10 @@ bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
 
         for (int cb = 0; cb < cfg.n_codebooks; ++cb) {
             output.push_back(frame_codes[cb]);
+        }
+
+        if (on_frame && !on_frame(frame_codes.data(), cfg.n_codebooks, frame)) {
+            break;  // user abort — keep what was generated
         }
 
         // Repetition-loop detection: babble tails ("lack lack lack") cycle
