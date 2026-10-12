@@ -115,6 +115,36 @@ Qwen3TtsAudio* qwen3_tts_synthesize_in_context(
     const char* ref_text,
     const Qwen3TtsParams* params);
 
+/* ── Streaming synthesis ──────────────────────────────────────────
+ * Audio chunks are delivered through the callback as they are produced.
+ * Plain/voice-clone: first chunk after ~2 s of generated audio (tune
+ * with QWEN3_TTS_STREAM_CHUNK_FRAMES). ICL: the model generates the
+ * reference echo first, so the first chunk additionally waits for the
+ * echo plus the transition margin. Return 0 from the callback to stop
+ * generation early; the callback is not invoked again afterwards. The
+ * returned Qwen3TtsAudio also contains the full audio (free it as
+ * usual). */
+
+typedef int (*qwen3_tts_stream_callback)(const float* samples,
+                                         int32_t n_samples,
+                                         void* user_data);
+
+Qwen3TtsAudio* qwen3_tts_synthesize_streaming(
+    Qwen3Tts* tts,
+    const char* text,
+    const Qwen3TtsParams* params,
+    qwen3_tts_stream_callback callback,
+    void* user_data);
+
+Qwen3TtsAudio* qwen3_tts_synthesize_in_context_streaming(
+    Qwen3Tts* tts,
+    const char* text,
+    const char* reference_audio_path,
+    const char* reference_text,
+    const Qwen3TtsParams* params,
+    qwen3_tts_stream_callback callback,
+    void* user_data);
+
 #ifdef __cplusplus
 }
 #endif
