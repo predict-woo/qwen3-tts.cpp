@@ -31,6 +31,11 @@ public:
     
     // Encode with TTS format: <|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n
     std::vector<int32_t> encode_for_tts(const std::string & text) const;
+
+    // Encode a voice-design instruct as a chat USER turn:
+    // <|im_start|>user\n{instruct}<|im_end|>\n
+    // (matches qwen_tts _build_instruct_text tokenization)
+    std::vector<int32_t> encode_for_instruct(const std::string & instruct) const;
     
     // Decode token IDs to text
     std::string decode(const std::vector<int32_t> & tokens) const;

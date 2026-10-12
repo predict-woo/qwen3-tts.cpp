@@ -144,6 +144,14 @@ public:
                                       const std::string & reference_text,
                                       const tts_params & params = tts_params());
 
+    /// Generate speech with voice design (instruct prompting).
+    /// Requires a VoiceDesign model (e.g. Qwen3-TTS-12Hz-1.7B-VoiceDesign).
+    /// instruct: natural-language voice description, e.g.
+    ///   "a young 6 year old girl from Manchester"
+    tts_result synthesize_voice_design(const std::string & text,
+                                        const std::string & instruct,
+                                        const tts_params & params = tts_params());
+
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
     
@@ -157,7 +165,8 @@ private:
     tts_result synthesize_internal(const std::string & text,
                                    const float * speaker_embedding,
                                    const tts_params & params,
-                                   tts_result & result);
+                                   tts_result & result,
+                                   const std::string & instruct = "");
 
     tts_result synthesize_icl_internal(const std::string & text,
                                         const float * speaker_embedding,
