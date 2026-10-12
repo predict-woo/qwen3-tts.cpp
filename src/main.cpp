@@ -13,6 +13,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  -o, --output <file>    Output WAV file (default: output.wav)\n");
     fprintf(stderr, "  -r, --reference <file> Reference audio for voice cloning\n");
     fprintf(stderr, "  --instruct <text>    Voice design instruct (needs VoiceDesign model)\n");
+    fprintf(stderr, "  -v, --verbose        Print progress during generation\n");
     fprintf(stderr, "      --ref-text <text>  Transcript (enables ICL cloning)\n");
     fprintf(stderr, "      --ref-code <file>  Pre-computed codec tokens (exact Python encoder)\n");
     fprintf(stderr, "  --temperature <val>    Sampling temperature (default: 0.9, 0=greedy)\n");
@@ -52,7 +53,9 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         
-        if (arg == "-h" || arg == "--help") {
+        if (arg == "-v" || arg == "--verbose") {
+            params.print_progress = true;
+        } else if (arg == "-h" || arg == "--help") {
             print_usage(argv[0]);
             return 0;
         } else if (arg == "-m" || arg == "--model") {

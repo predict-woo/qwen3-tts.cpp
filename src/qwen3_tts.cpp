@@ -429,6 +429,10 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
             sample_memory("synth/after-transformer-reload");
         }
     }
+    const char * attn_dump_path = getenv("QWEN3_TTS_ATTN_DUMP");
+    if (attn_dump_path && *attn_dump_path) {
+        transformer_.set_attn_dump(true);
+    }
     transformer_.clear_kv_cache();
     
     std::vector<int32_t> speech_codes;

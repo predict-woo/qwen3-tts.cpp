@@ -211,6 +211,14 @@ public:
 
     // Enable [ICL-prefill] debug dumps (development aid)
     void set_debug_dump(bool enabled) { debug_dump_ = enabled; }
+
+    // Attention-over-context dump for word-alignment research: when
+    // enabled, forward_step accumulates the head-averaged post-softmax
+    // attention row of the last talker layer, one row per generated frame.
+    void set_attn_dump(bool enabled, int layer = 27) { attn_dump_ = enabled; attn_dump_layer_ = layer; }
+    // One attention row per generated frame; row f covers KV 0..base+f
+    // (the cache grows by one entry per frame).
+    const std::vector<std::vector<float>> & attn_rows() const { return attn_rows_; }
     
     // Initialize KV cache
     bool init_kv_cache(int32_t n_ctx);
@@ -384,6 +392,9 @@ private:
 
     // Enable [ICL-prefill] debug dumps (development aid)
     bool debug_dump_ = false;
+    bool attn_dump_ = false;
+    int attn_dump_layer_ = 27;
+    std::vector<std::vector<float>> attn_rows_;
     CoreMLCodePredictor coreml_code_predictor_;
     bool use_coreml_code_predictor_ = false;
     std::string coreml_code_predictor_path_;

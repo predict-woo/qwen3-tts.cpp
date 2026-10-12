@@ -1716,6 +1716,12 @@ struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past) {
         KQ = ggml_scale(ctx0, KQ, KQscale);
         KQ = ggml_diag_mask_inf(ctx0, KQ, n_past);
         KQ = ggml_soft_max(ctx0, KQ);
+        if (attn_dump_) {
+            char aname[24];
+            snprintf(aname, sizeof(aname), "step_attn_%d", il);
+            ggml_set_name(KQ, aname);
+            ggml_set_output(KQ);
+        }
         
         V = ggml_cont(ctx0, ggml_transpose(ctx0, V));
         
@@ -2475,6 +2481,24 @@ bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past,
     
     output.resize(model_.config.codec_vocab_size);
     ggml_backend_tensor_get(logits, output.data(), 0, output.size() * sizeof(float));
+    
+    if (attn_dump_) {
+        // dump every layer's post-softmax KQ: [n_kv, n_head] per layer
+        const auto & cfg = model_.config;
+        for (int il = 0; il < cfg.n_layers; ++il) {
+            char aname[24];
+            snprintf(aname, sizeof(aname), "step_attn_%d", il);
+            struct ggml_tensor * attn = ggml_graph_get_tensor(gf, aname);
+            if (!attn) continue;
+            // KQ is [n_kv, T_q=1, n_head] — heads live in ne[2], and the
+            // flat data is head-major blocks of n_kv
+            const int32_t n_kv_a = (int32_t)attn->ne[0];
+            const int32_t n_head_a = (int32_t)(attn->ne[1] * attn->ne[2]);
+            std::vector<float> raw((size_t)n_kv_a * n_head_a);
+            ggml_backend_tensor_get(attn, raw.data(), 0, raw.size() * sizeof(float));
+            attn_rows_.push_back(std::move(raw));
+        }
+    }
     
     state_.cache.n_used = n_past + 1;
     
