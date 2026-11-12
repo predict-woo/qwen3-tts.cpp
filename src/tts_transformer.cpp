@@ -1381,8 +1381,9 @@ bool TTSTransformer::build_prefill_graph_icl(
             }
         }
 
-        // Codec embedding
-        if (i < n_codec) {
+        // Codec embedding (i < n_codec always holds: the interleave is
+        // capped at the codec length)
+        {
             const float * crow = codec_frame_embeds.data() + (size_t)i * hidden_size;
             for (int32_t h = 0; h < hidden_size; h++) {
                 dst[h] += crow[h];

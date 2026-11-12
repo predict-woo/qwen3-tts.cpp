@@ -751,15 +751,6 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
         return result;
     }
 
-    // Encode reference audio to codec tokens using the Mimi encoder
-    if (!codec_encoder_loaded_) {
-        // The codec encoder loads from the same tokenizer GGUF as the decoder
-        if (!codec_encoder_.load(decoder_model_path_)) {
-            result.error_msg = "Failed to load codec encoder: " + std::string(codec_encoder_.get_error());
-            return result;
-        }
-        codec_encoder_loaded_ = true;
-    }
     std::vector<int32_t> ref_codec_tokens;
     int32_t n_ref_frames = 0;
 
@@ -801,6 +792,16 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
     }
 
     if (!loaded_precomputed) {
+        // Encode reference audio to codec tokens using the Mimi encoder
+        // (skipped entirely when pre-computed tokens were supplied)
+        if (!codec_encoder_loaded_) {
+            // The codec encoder loads from the same tokenizer GGUF as the decoder
+            if (!codec_encoder_.load(decoder_model_path_)) {
+                result.error_msg = "Failed to load codec encoder: " + std::string(codec_encoder_.get_error());
+                return result;
+            }
+            codec_encoder_loaded_ = true;
+        }
         if (!codec_encoder_.encode(ref_samples.data(), (int32_t)ref_samples.size(),
                                     ref_codec_tokens, n_ref_frames)) {
             result.error_msg = "Failed to encode reference audio: " + std::string(codec_encoder_.get_error());
