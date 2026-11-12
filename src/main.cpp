@@ -199,6 +199,10 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "ICL mode with transcript: %zu chars\n", ref_text.size());
             result = tts.synthesize_in_context(text, reference_audio, ref_text, params);
         } else {
+            if (!ref_code_file.empty()) {
+                fprintf(stderr, "Error: --ref-code requires --ref-text (ICL mode)\n");
+                return 1;
+            }
             result = tts.synthesize_with_voice(text, reference_audio, params);
         }
     }

@@ -780,7 +780,13 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
         while (fscanf(f, "%d", &val) == 1) {
             ref_codec_tokens.push_back(val);
         }
+        char junk = 0;
+        const bool has_trailing_garbage = (fscanf(f, " %c", &junk) == 1);
         fclose(f);
+        if (has_trailing_garbage) {
+            result.error_msg = "ref-code file malformed (trailing non-numeric data): " + ref_code_path;
+            return result;
+        }
         if (ref_codec_tokens.empty() || ref_codec_tokens.size() % 16 != 0) {
             result.error_msg = "ref-code file malformed (expected whitespace-separated "
                                "integers, a multiple of 16): " + ref_code_path;
