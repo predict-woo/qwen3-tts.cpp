@@ -187,7 +187,12 @@ int main(int argc, char ** argv) {
     
     // Generate speech
     qwen3_tts::tts_result result;
-    
+
+    if (!ref_code_file.empty() && ref_text.empty()) {
+        fprintf(stderr, "Error: --ref-code requires --ref-text (ICL mode)\n");
+        return 1;
+    }
+
     if (reference_audio.empty()) {
         fprintf(stderr, "Synthesizing: \"%s\"\n", text.c_str());
         result = tts.synthesize(text, params);
@@ -199,10 +204,6 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "ICL mode with transcript: %zu chars\n", ref_text.size());
             result = tts.synthesize_in_context(text, reference_audio, ref_text, params);
         } else {
-            if (!ref_code_file.empty()) {
-                fprintf(stderr, "Error: --ref-code requires --ref-text (ICL mode)\n");
-                return 1;
-            }
             result = tts.synthesize_with_voice(text, reference_audio, params);
         }
     }
