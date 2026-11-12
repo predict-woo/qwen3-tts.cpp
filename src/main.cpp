@@ -227,7 +227,7 @@ int main(int argc, char ** argv) {
                 : tts.synthesize_in_context(text, reference_audio, ref_text, params);
         } else {
             result = stream_mode
-                ? tts.synthesize_streaming(text, params, stream_cli_callback)
+                ? tts.synthesize_with_voice(text, reference_audio, params, stream_cli_callback)
                 : tts.synthesize_with_voice(text, reference_audio, params);
         }
     }

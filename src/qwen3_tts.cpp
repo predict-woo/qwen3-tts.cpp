@@ -288,9 +288,10 @@ tts_result Qwen3TTS::synthesize(const std::string & text,
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const std::string & reference_audio,
-                                            const tts_params & params) {
+                                            const tts_params & params,
+                                            const StreamingAudioCallback & on_audio) {
     tts_result result;
-    
+
     std::vector<float> ref_samples;
     int ref_sample_rate;
     if (!load_audio_file(reference_audio, ref_samples, ref_sample_rate)) {
@@ -306,12 +307,13 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
         ref_samples = std::move(resampled);
     }
     
-    return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), params);
+    return synthesize_with_voice(text, ref_samples.data(), (int32_t)ref_samples.size(), params, on_audio);
 }
 
 tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
                                             const float * ref_samples, int32_t n_ref_samples,
-                                            const tts_params & params) {
+                                            const tts_params & params,
+                                            const StreamingAudioCallback & on_audio) {
     tts_result result;
     
     if (!models_loaded_) {
@@ -349,8 +351,9 @@ tts_result Qwen3TTS::synthesize_with_voice(const std::string & text,
     if (params.print_progress) {
         fprintf(stderr, "Speaker embedding extracted: %zu floats\n", speaker_embedding.size());
     }
-    
-    return synthesize_internal(text, speaker_embedding.data(), params, result);
+
+    return synthesize_internal(text, speaker_embedding.data(), params, result,
+                               on_audio ? &on_audio : nullptr);
 }
 
 bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_ref_samples,

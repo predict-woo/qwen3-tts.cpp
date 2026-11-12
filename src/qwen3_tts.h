@@ -110,18 +110,22 @@ public:
     // text: input text to synthesize
     // reference_audio: path to reference audio file (WAV, 24kHz)
     // params: generation parameters
+    // on_audio: optional streaming callback (progressive delivery)
     tts_result synthesize_with_voice(const std::string & text,
                                       const std::string & reference_audio,
-                                      const tts_params & params = tts_params());
+                                      const tts_params & params = tts_params(),
+                                      const StreamingAudioCallback & on_audio = nullptr);
     
     // Generate speech with voice cloning from samples
     // text: input text to synthesize
     // ref_samples: reference audio samples (24kHz, mono, normalized to [-1, 1])
     // n_ref_samples: number of reference samples
     // params: generation parameters
+    // on_audio: optional streaming callback (progressive delivery)
     tts_result synthesize_with_voice(const std::string & text,
                                       const float * ref_samples, int32_t n_ref_samples,
-                                      const tts_params & params = tts_params());
+                                      const tts_params & params = tts_params(),
+                                      const StreamingAudioCallback & on_audio = nullptr);
     
     // Extract speaker embedding from raw audio samples (for caching)
     // ref_samples: 24kHz mono float32 normalized to [-1, 1]
