@@ -181,7 +181,7 @@ class Qwen3TTSConverter:
         self.code_predictor_vocab_size = code_predictor_config.get("vocab_size", 2048)
         self.code_predictor_hidden_size = code_predictor_config.get("hidden_size", 1024)
         self.code_predictor_intermediate_size = code_predictor_config.get("intermediate_size", 3072)
-        self.code_predictor_rope_theta = code_predictor_config.get("rope_theta", 10000)
+        self.code_predictor_rope_theta = code_predictor_config.get("rope_theta", 1000000)
 
         # Speaker Encoder parameters
         self.speaker_enc_dim = speaker_encoder_config.get("enc_dim", 1024)

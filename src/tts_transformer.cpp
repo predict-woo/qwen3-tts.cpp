@@ -297,10 +297,15 @@ bool TTSTransformer::parse_config(struct gguf_context * ctx) {
         "qwen3-tts.code_pred.feed_forward_length",
         "qwen3-tts.code_predictor.feed_forward_length",
     }, 3072);
+    // Fall back to the talker freq_base: GGUFs converted before this field
+    // existed have no code_predictor.rope.freq_base, and both HF configs
+    // (0.6B and 1.7B) set code_predictor_config.rope_theta to the same
+    // 1000000 as the talker. Defaulting to 10000 would silently run every
+    // pre-existing GGUF with the wrong theta.
     cfg.code_pred_rope_theta = get_f32_any({
         "qwen3-tts.code_pred.rope.freq_base",
         "qwen3-tts.code_predictor.rope.freq_base",
-    }, 10000.0f);
+    }, cfg.rope_theta);
 
     cfg.codec_pad_id = get_u32_any({
         "qwen3-tts.codec.pad_id",
