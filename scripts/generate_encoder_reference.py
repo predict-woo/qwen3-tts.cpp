@@ -4,14 +4,22 @@
 Creates a 1-second sine wave, runs it through the Python Mimi encoder,
 and saves the codec tokens + intermediate activations for C++ comparison.
 
-Usage: python scripts/generate_encoder_reference.py
+Usage: python scripts/generate_encoder_reference.py <speech_tokenizer_dir>
 Output: reference/enc_reference.json + reference/enc_*.bin
+
+<speech_tokenizer_dir> is the path to the model's speech_tokenizer
+directory (e.g. .../Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer).
 """
 import json
 import sys
 import numpy as np
 
 def main():
+    if len(sys.argv) != 2:
+        print(__doc__)
+        sys.exit(1)
+    tokenizer_dir = sys.argv[1]
+
     # Try loading the tokenizer
     try:
         from qwen_tts import Qwen3TTSTokenizer
@@ -20,9 +28,9 @@ def main():
         print("Install with: pip install qwen-tts")
         sys.exit(1)
 
-    print("Loading tokenizer...")
+    print(f"Loading tokenizer from {tokenizer_dir}...")
     tokenizer = Qwen3TTSTokenizer.from_pretrained(
-        "/home/willwade/spikes/qwen3-tts.cpp/models/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer",
+        tokenizer_dir,
         device_map="cpu",
     )
 
