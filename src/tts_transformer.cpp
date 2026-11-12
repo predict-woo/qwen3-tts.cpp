@@ -1354,7 +1354,12 @@ bool TTSTransformer::build_prefill_graph_icl(
     //                tts_pad + codec_embed[i]            (if only codec)
     // Use n_codec_total (includes codec_bos) for interleaving
     n_codec = n_codec_total;
-    icl_len = std::max(n_text, n_codec);
+    // Python (lines 2014-2018): the interleave never extends past the codec
+    // stream. When codec > text, text is padded with tts_pad up to the codec
+    // length; when text > codec, only text[:n_codec] is interleaved and the
+    // excess becomes trailing text for the generation steps — it is NOT
+    // appended to the prefill with no codec/pad embedding.
+    icl_len = n_codec;
 
     // Interleaving (Python lines 2014-2018):
     //   if text > codec: text[:codec_len] + codec, then text[codec_len:] as trailing
@@ -1391,9 +1396,16 @@ bool TTSTransformer::build_prefill_graph_icl(
     memcpy(prefill_embd.data() + base_len * hidden_size,
            icl_embed.data(), icl_embed.size() * sizeof(float));
 
-    // Trailing text hidden (for step embedding during generation)
-    // In ICL mode, this is typically empty since all text is in the prefill
+    // Trailing text: excess text tokens past the codec stream, consumed one
+    // row per generated frame (mirrors the Python streaming path's
+    // text_embed[:, codec_lens:] return). Empty when text fits in the prefill.
     trailing_text_hidden.clear();
+    if (n_text > n_codec) {
+        if (!project_text_tokens(combined_text.data() + n_codec, n_text - n_codec,
+                                 trailing_text_hidden)) {
+            return false;
+        }
+    }
 
     if (debug_dump_) {
         size_t total_len = prefill_embd.size() / hidden_size;
