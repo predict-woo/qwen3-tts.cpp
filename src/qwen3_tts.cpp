@@ -766,22 +766,31 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
     // Check for pre-computed codec tokens (exact Python encoder output)
     // This bypasses the C++ encoder's F16 precision loss entirely.
     // Passed via tts_params (portable; setenv is not available on MSVC).
+    // A missing/unreadable/malformed file is an error — never a silent
+    // fallback to the encoder, which would quietly change the voice.
     const std::string & ref_code_path = params.ref_code_path;
     bool loaded_precomputed = false;
     if (!ref_code_path.empty()) {
         FILE * f = fopen(ref_code_path.c_str(), "r");
-        if (f) {
-            int val;
-            while (fscanf(f, "%d", &val) == 1) {
-                ref_codec_tokens.push_back(val);
-            }
-            fclose(f);
-            n_ref_frames = (int32_t)ref_codec_tokens.size() / 16;
-            loaded_precomputed = n_ref_frames > 0;
-            if (loaded_precomputed && params.print_progress) {
-                fprintf(stderr, "ICL: loaded %d pre-computed codec frames from %s\n",
-                        n_ref_frames, ref_code_path.c_str());
-            }
+        if (!f) {
+            result.error_msg = "ref-code file not readable: " + ref_code_path;
+            return result;
+        }
+        int val;
+        while (fscanf(f, "%d", &val) == 1) {
+            ref_codec_tokens.push_back(val);
+        }
+        fclose(f);
+        if (ref_codec_tokens.empty() || ref_codec_tokens.size() % 16 != 0) {
+            result.error_msg = "ref-code file malformed (expected whitespace-separated "
+                               "integers, a multiple of 16): " + ref_code_path;
+            return result;
+        }
+        n_ref_frames = (int32_t)ref_codec_tokens.size() / 16;
+        loaded_precomputed = true;
+        if (params.print_progress) {
+            fprintf(stderr, "ICL: loaded %d pre-computed codec frames from %s\n",
+                    n_ref_frames, ref_code_path.c_str());
         }
     }
 
