@@ -2920,7 +2920,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                int32_t language_id,
                                float repetition_penalty,
                                float temperature,
-                               int32_t top_k) {
+                               int32_t top_k,
+                               bool rep_loop_detect) {
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};
@@ -3096,7 +3097,11 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
         // near-identical 16-codebook frames with sampling jitter. A frame is
         // "repetitive" when >= 10/16 codes match a frame 1-6 back (periods up
         // to 6). Natural speech never sustains that for 5 consecutive frames.
-        rep_frames.emplace_back(frame_codes.begin(), frame_codes.end());
+        // OPT-IN (rep_loop_detect): consecutive near-silence frames can also
+        // match >= 10/16 codes, so a long pause in a deterministic (greedy)
+        // plain-mode generation could truncate mid-utterance. It stays on for
+        // ICL, where it is part of the layered babble-tail mitigation.
+        if (rep_loop_detect) rep_frames.emplace_back(frame_codes.begin(), frame_codes.end());
         {
             const size_t n_f = rep_frames.size();
             bool is_rep = false;
@@ -3252,7 +3257,8 @@ bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
                                    float temperature,
                                    int32_t top_k,
                                    float eos_bias,
-                                   int32_t target_frames) {
+                                   int32_t target_frames,
+                                   bool rep_loop_detect) {
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -3422,7 +3428,11 @@ bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
         // near-identical 16-codebook frames with sampling jitter. A frame is
         // "repetitive" when >= 10/16 codes match a frame 1-6 back (periods up
         // to 6). Natural speech never sustains that for 5 consecutive frames.
-        rep_frames.emplace_back(frame_codes.begin(), frame_codes.end());
+        // OPT-IN (rep_loop_detect): consecutive near-silence frames can also
+        // match >= 10/16 codes, so a long pause in a deterministic (greedy)
+        // plain-mode generation could truncate mid-utterance. It stays on for
+        // ICL, where it is part of the layered babble-tail mitigation.
+        if (rep_loop_detect) rep_frames.emplace_back(frame_codes.begin(), frame_codes.end());
         {
             const size_t n_f = rep_frames.size();
             bool is_rep = false;

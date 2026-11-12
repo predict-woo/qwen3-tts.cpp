@@ -274,7 +274,8 @@ public:
                   int32_t language_id = 2050,
                   float repetition_penalty = 1.05f,
                   float temperature = 0.9f,
-                  int32_t top_k = 50);
+                  int32_t top_k = 50,
+                  bool rep_loop_detect = false);
 
     /// Generate speech codes with in-context voice cloning.
     /// ref_codec_tokens: [n_ref_frames × 16] from the codec encoder.
@@ -291,7 +292,8 @@ public:
                       float temperature = 0.9f,
                       int32_t top_k = 50,
                       float eos_bias = 0.0f,
-                      int32_t target_frames = 0);
+                      int32_t target_frames = 0,
+                      bool rep_loop_detect = true);
     
     const tts_transformer_config & get_config() const { return model_.config; }
     
