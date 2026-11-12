@@ -1338,7 +1338,7 @@ bool TTSTransformer::build_prefill_graph_icl(
     // Interleave: text ⊕ codec with element-wise addition
     int32_t n_text = (int32_t)combined_text.size();
     int32_t n_codec = n_ref_frames;
-    int32_t icl_len = std::max(n_text, n_codec);
+    int32_t icl_len = 0; // set to the codec length once codec_bos is included below
 
     // Project all text tokens at once
     std::vector<float> text_proj_all;
@@ -1399,12 +1399,12 @@ bool TTSTransformer::build_prefill_graph_icl(
     // Trailing text: excess text tokens past the codec stream, consumed one
     // row per generated frame (mirrors the Python streaming path's
     // text_embed[:, codec_lens:] return). Empty when text fits in the prefill.
+    // Sliced from text_proj_all rather than re-projected.
     trailing_text_hidden.clear();
     if (n_text > n_codec) {
-        if (!project_text_tokens(combined_text.data() + n_codec, n_text - n_codec,
-                                 trailing_text_hidden)) {
-            return false;
-        }
+        const int32_t trailing_rows = n_text - n_codec;
+        const float * excess = text_proj_all.data() + (size_t)n_codec * hidden_size;
+        trailing_text_hidden.assign(excess, excess + (size_t)trailing_rows * hidden_size);
     }
 
     if (debug_dump_) {
@@ -3489,7 +3489,8 @@ bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
             }
         }
 
-        // Trailing text (empty in ICL mode — use tts_pad)
+        // Trailing text: excess text rows while available, then tts_pad
+        // (non-empty in ICL mode when the text stream outlasts the codec)
         const float * trailing_row = (frame < trailing_len)
             ? trailing_text_hidden.data() + (size_t)frame * cfg.hidden_size
             : tts_pad_embed.data();
