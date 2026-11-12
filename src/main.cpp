@@ -79,6 +79,12 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             reference_audio = argv[i];
+        } else if (arg == "--ref-text") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing reference text\n");
+                return 1;
+            }
+            ref_text = argv[i];
         } else if (arg == "--instruct") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing instruct text\n");
