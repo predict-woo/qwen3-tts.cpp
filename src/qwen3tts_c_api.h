@@ -20,6 +20,8 @@ typedef struct Qwen3TtsParams {
     int32_t n_threads;           /* default: 4 */
     float   repetition_penalty;  /* default: 1.05 */
     int32_t language_id;         /* 2050=en, 2058=ja, 2055=zh, etc. */
+    const char* ref_code_path;   /* optional: pre-computed codec tokens file
+                                    (ICL only; bypasses the codec encoder) */
 } Qwen3TtsParams;
 
 /* Generated audio result */

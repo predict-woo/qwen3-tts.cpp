@@ -38,6 +38,7 @@ struct Qwen3TtsParams {
     int32_t n_threads;
     float   repetition_penalty;
     int32_t language_id;
+    const char * ref_code_path;
 };
 
 struct Qwen3TtsAudio {
@@ -63,6 +64,9 @@ static qwen3_tts::tts_params to_cpp_params(const Qwen3TtsParams * p) {
         params.n_threads         = p->n_threads;
         params.repetition_penalty = p->repetition_penalty;
         params.language_id       = p->language_id;
+        if (p->ref_code_path) {
+            params.ref_code_path = p->ref_code_path;
+        }
     }
     return params;
 }
@@ -96,6 +100,7 @@ void qwen3_tts_default_params(Qwen3TtsParams * params) {
     params->n_threads         = 4;
     params->repetition_penalty = 1.05f;
     params->language_id       = 2050; // en
+    params->ref_code_path     = NULL;
 }
 
 Qwen3Tts * qwen3_tts_create(const char * model_dir, int32_t n_threads) {
@@ -262,6 +267,9 @@ Qwen3TtsAudio* qwen3_tts_synthesize_in_context(
     tp.top_k = p.top_k;
     tp.repetition_penalty = p.repetition_penalty;
     tp.language_id = p.language_id;
+    if (p.ref_code_path) {
+        tp.ref_code_path = p.ref_code_path;
+    }
 
     qwen3_tts::tts_result result = tts->engine.synthesize_in_context(
         text, reference_audio_path, ref_text, tp);
