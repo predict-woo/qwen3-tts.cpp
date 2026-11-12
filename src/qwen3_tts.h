@@ -45,6 +45,10 @@ struct tts_params {
     // Language ID for codec (2050=en, 2069=ru, 2055=zh, 2058=ja, 2064=ko, 2053=de, 2061=fr, 2054=es)
     int32_t language_id = 2050;
 
+    // Path to pre-computed codec tokens for ICL (one integer per line,
+    // 16 per frame). When set, bypasses the C++ codec encoder entirely.
+    std::string ref_code_path;
+
 };
 
 // TTS generation result

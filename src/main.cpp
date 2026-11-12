@@ -195,9 +195,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "Synthesizing with voice cloning: \"%s\"\n", text.c_str());
         fprintf(stderr, "Reference audio: %s\n", reference_audio.c_str());
         if (!ref_text.empty()) {
-            if (!ref_code_file.empty()) {
-                setenv("QWEN3_TTS_REF_CODE", ref_code_file.c_str(), 1);
-            }
+            params.ref_code_path = ref_code_file;
             fprintf(stderr, "ICL mode with transcript: %zu chars\n", ref_text.size());
             result = tts.synthesize_in_context(text, reference_audio, ref_text, params);
         } else {

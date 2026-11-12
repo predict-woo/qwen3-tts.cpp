@@ -765,10 +765,11 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
 
     // Check for pre-computed codec tokens (exact Python encoder output)
     // This bypasses the C++ encoder's F16 precision loss entirely.
-    const char * ref_code_path = getenv("QWEN3_TTS_REF_CODE");
+    // Passed via tts_params (portable; setenv is not available on MSVC).
+    const std::string & ref_code_path = params.ref_code_path;
     bool loaded_precomputed = false;
-    if (ref_code_path && *ref_code_path) {
-        FILE * f = fopen(ref_code_path, "r");
+    if (!ref_code_path.empty()) {
+        FILE * f = fopen(ref_code_path.c_str(), "r");
         if (f) {
             int val;
             while (fscanf(f, "%d", &val) == 1) {
@@ -779,7 +780,7 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
             loaded_precomputed = n_ref_frames > 0;
             if (loaded_precomputed && params.print_progress) {
                 fprintf(stderr, "ICL: loaded %d pre-computed codec frames from %s\n",
-                        n_ref_frames, ref_code_path);
+                        n_ref_frames, ref_code_path.c_str());
             }
         }
     }
