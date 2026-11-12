@@ -195,6 +195,10 @@ public:
     // Load model from GGUF file
     bool load_model(const std::string & model_path);
 
+    // Cap intra-op threads on the CPU backend(s); no-op for non-CPU backends.
+    // Call after load_model(), before the first forward pass.
+    void set_n_threads(int32_t n_threads);
+
     // Release all model/runtime resources
     void unload_model();
     

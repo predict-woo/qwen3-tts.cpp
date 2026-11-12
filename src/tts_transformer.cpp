@@ -1,5 +1,6 @@
 #include "tts_transformer.h"
 #include "gguf_loader.h"
+#include "ggml-cpu.h"
 
 #include <cmath>
 #include <cstring>
@@ -47,6 +48,21 @@ void TTSTransformer::unload_model() {
     state_.compute_meta.clear();
     last_hidden_.clear();
     embd_row_fp16_scratch_.clear();
+}
+
+void TTSTransformer::set_n_threads(int32_t n_threads) {
+    if (n_threads <= 0) {
+        return;
+    }
+    if (state_.backend_cpu) {
+        ggml_backend_cpu_set_n_threads(state_.backend_cpu, n_threads);
+    }
+    if (state_.backend) {
+        ggml_backend_dev_t device = ggml_backend_get_device(state_.backend);
+        if (device && ggml_backend_dev_type(device) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+            ggml_backend_cpu_set_n_threads(state_.backend, n_threads);
+        }
+    }
 }
 
 bool TTSTransformer::load_model(const std::string & model_path) {
@@ -1241,8 +1257,9 @@ struct ggml_cgraph * TTSTransformer::build_prefill_forward_graph(int32_t n_token
         
         cur = ggml_mul(ctx0, gate, up);
         
-        struct ggml_tensor * ffn_down_f32 = ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
-        cur = ggml_mul_mat(ctx0, ffn_down_f32, cur);
+        struct ggml_tensor * ffn_down_w = ggml_is_quantized(layer.ffn_down->type)
+            ? layer.ffn_down : ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
+        cur = ggml_mul_mat(ctx0, ffn_down_w, cur);
         
         inpL = ggml_add(ctx0, cur, inpFF);
     }
@@ -1386,8 +1403,9 @@ struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past) {
         
         cur = ggml_mul(ctx0, gate, up);
         
-        struct ggml_tensor * ffn_down_f32 = ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
-        cur = ggml_mul_mat(ctx0, ffn_down_f32, cur);
+        struct ggml_tensor * ffn_down_w = ggml_is_quantized(layer.ffn_down->type)
+            ? layer.ffn_down : ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
+        cur = ggml_mul_mat(ctx0, ffn_down_w, cur);
         
         inpL = ggml_add(ctx0, cur, inpFF);
     }
@@ -1506,8 +1524,9 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes)
         
         cur = ggml_mul(ctx0, gate, up);
         
-        struct ggml_tensor * old_ffn_down_f32 = ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
-        cur = ggml_mul_mat(ctx0, old_ffn_down_f32, cur);
+        struct ggml_tensor * old_ffn_down_w = ggml_is_quantized(layer.ffn_down->type)
+            ? layer.ffn_down : ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
+        cur = ggml_mul_mat(ctx0, old_ffn_down_w, cur);
         
         inpL = ggml_add(ctx0, cur, inpFF);
     }
@@ -1650,8 +1669,9 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
         
         cur = ggml_mul(ctx0, gate, up);
         
-        struct ggml_tensor * ffn_down_f32 = ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
-        cur = ggml_mul_mat(ctx0, ffn_down_f32, cur);
+        struct ggml_tensor * ffn_down_w = ggml_is_quantized(layer.ffn_down->type)
+            ? layer.ffn_down : ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
+        cur = ggml_mul_mat(ctx0, ffn_down_w, cur);
         
         inpL = ggml_add(ctx0, cur, inpFF);
     }
@@ -1806,8 +1826,9 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
         
         cur = ggml_mul(ctx0, gate, up);
         
-        struct ggml_tensor * step_ffn_down_f32 = ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
-        cur = ggml_mul_mat(ctx0, step_ffn_down_f32, cur);
+        struct ggml_tensor * step_ffn_down_w = ggml_is_quantized(layer.ffn_down->type)
+            ? layer.ffn_down : ggml_cast(ctx0, layer.ffn_down, GGML_TYPE_F32);
+        cur = ggml_mul_mat(ctx0, step_ffn_down_w, cur);
         
         inpL = ggml_add(ctx0, cur, inpFF);
     }
