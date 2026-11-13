@@ -431,7 +431,7 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     }
     const char * attn_dump_path = getenv("QWEN3_TTS_ATTN_DUMP");
     if (attn_dump_path && *attn_dump_path) {
-        transformer_.set_attn_dump(true);
+        transformer_.set_attn_dump(attn_dump_path);
     }
     transformer_.clear_kv_cache();
     
