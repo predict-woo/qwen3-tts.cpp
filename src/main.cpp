@@ -12,6 +12,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  -t, --text <text>      Text to synthesize (required)\n");
     fprintf(stderr, "  -o, --output <file>    Output WAV file (default: output.wav)\n");
     fprintf(stderr, "  -r, --reference <file> Reference audio for voice cloning\n");
+    fprintf(stderr, "  --instruct <text>    Voice design instruct (needs VoiceDesign model)\n");
     fprintf(stderr, "      --ref-text <text>  Transcript (enables ICL cloning)\n");
     fprintf(stderr, "      --ref-code <file>  Pre-computed codec tokens (exact Python encoder)\n");
     fprintf(stderr, "  --temperature <val>    Sampling temperature (default: 0.9, 0=greedy)\n");
@@ -42,6 +43,7 @@ int main(int argc, char ** argv) {
     std::string output_file = "output.wav";
     std::string reference_audio;
     std::string ref_text;
+    std::string instruct_text;
     std::string ref_code_file;  // pre-computed codec tokens (bypasses C++ encoder)
     
     qwen3_tts::tts_params params;
@@ -83,7 +85,13 @@ int main(int argc, char ** argv) {
                 return 1;
             }
             ref_text = argv[i];
-        } else if (arg == "--ref-code") {
+        } else if (arg == "--instruct") {
+            if (++i >= argc) {
+                fprintf(stderr, "Error: missing instruct text\n");
+                return 1;
+            }
+            instruct_text = argv[i];
+} else if (arg == "--ref-code") {
             if (++i >= argc) {
                 fprintf(stderr, "Error: missing ref-code file\n");
                 return 1;
@@ -193,7 +201,11 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    if (reference_audio.empty()) {
+    if (!instruct_text.empty()) {
+        fprintf(stderr, "Synthesizing with voice design: \"%s\"\n", text.c_str());
+        fprintf(stderr, "Instruct: %s\n", instruct_text.c_str());
+        result = tts.synthesize_voice_design(text, instruct_text, params);
+    } else if (reference_audio.empty()) {
         fprintf(stderr, "Synthesizing: \"%s\"\n", text.c_str());
         result = tts.synthesize(text, params);
     } else {

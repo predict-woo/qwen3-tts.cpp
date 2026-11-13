@@ -1031,7 +1031,9 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
                                          const float * speaker_embd, int32_t language_id,
                                          std::vector<float> & prefill_embd,
                                          std::vector<float> & trailing_text_hidden,
-                                         std::vector<float> & tts_pad_embed) {
+                                         std::vector<float> & tts_pad_embed,
+                                         const int32_t * instruct_tokens,
+                                         int32_t n_instruct) {
     if (!text_tokens) {
         error_msg_ = "text_tokens is null";
         return false;
@@ -1140,10 +1142,26 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
         first_text_plus_codec_bos[h] = first_text_embed[h] + codec_bos_embed[h];
     }
 
-    const int32_t prefill_len = 3 + codec_plus_overlay_len + 1;
+    // Voice-design instruct (optional): a chat USER turn whose projected text
+    // embeddings are PREPENDED to the standard prefill (Python: instruct ids
+    // are appended to talker_input_embeds first, before the standard prompt).
+    std::vector<float> instruct_proj;
+    int32_t instruct_len = 0;
+    if (instruct_tokens && n_instruct > 0) {
+        if (!project_text_tokens(instruct_tokens, n_instruct, instruct_proj)) {
+            return false;
+        }
+        instruct_len = n_instruct;
+    }
+
+    const int32_t prefill_len = instruct_len + 3 + codec_plus_overlay_len + 1;
     prefill_embd.resize((size_t)prefill_len * hidden_size);
-    memcpy(prefill_embd.data(), role_embed.data(), role_embed.size() * sizeof(float));
-    memcpy(prefill_embd.data() + (size_t)3 * hidden_size,
+    if (instruct_len > 0) {
+        memcpy(prefill_embd.data(), instruct_proj.data(), instruct_proj.size() * sizeof(float));
+    }
+    memcpy(prefill_embd.data() + (size_t)instruct_len * hidden_size,
+           role_embed.data(), role_embed.size() * sizeof(float));
+    memcpy(prefill_embd.data() + (size_t)(instruct_len + 3) * hidden_size,
            codec_plus_overlay.data(), codec_plus_overlay.size() * sizeof(float));
     memcpy(prefill_embd.data() + (size_t)(prefill_len - 1) * hidden_size,
            first_text_plus_codec_bos.data(), hidden_size * sizeof(float));
@@ -2943,6 +2961,10 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                float repetition_penalty,
                                float temperature,
                                int32_t top_k,
+                               const int32_t * instruct_tokens,
+                               int32_t n_instruct,
+                               float eos_bias,
+                               int32_t target_frames,
                                bool rep_loop_detect) {
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
@@ -2979,7 +3001,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     t0 = clk::now();
 #endif
     if (!build_prefill_graph(text_tokens, n_tokens, speaker_embd, language_id,
-                             prefill_embd, trailing_text_hidden, tts_pad_embed)) {
+                             prefill_embd, trailing_text_hidden, tts_pad_embed,
+                             instruct_tokens, n_instruct)) {
         return false;
     }
 #ifdef QWEN3_TTS_TIMING
@@ -3049,12 +3072,30 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
             }
         }
 
+        // EOS logit bias (same mitigation as generate_icl): the 1.7B models
+        // under-sample EOS and run into babble past the speech end. Applied to
+        // raw logits in greedy mode and post-temperature-scaled logits in
+        // sampling mode. Past target_frames the bias ramps (+0.1/frame, +6.0
+        // cap) so babble trajectories end ~1-2s past the target.
+        float eff_eos_bias = eos_bias;
+        if (target_frames > 0 && frame > target_frames) {
+            eff_eos_bias += 0.1f * (float)(frame - target_frames);
+            if (eff_eos_bias > 6.0f) eff_eos_bias = 6.0f;
+        }
+
         int32_t next_token;
         if (temperature <= 0.0f) {
+            if (eff_eos_bias != 0.0f) {
+                logits[cfg.codec_eos_id] += eff_eos_bias;
+            }
             next_token = argmax(logits.data(), cfg.codec_vocab_size);
         } else {
             for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
                 logits[i] /= temperature;
+            }
+
+            if (eff_eos_bias != 0.0f) {
+                logits[cfg.codec_eos_id] += eff_eos_bias;
             }
 
             if (top_k > 0 && top_k < cfg.codec_vocab_size) {

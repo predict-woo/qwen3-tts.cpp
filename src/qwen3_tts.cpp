@@ -346,10 +346,26 @@ tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
     return synthesize_internal(text, embedding, params, result);
 }
 
+tts_result Qwen3TTS::synthesize_voice_design(const std::string & text,
+                                               const std::string & instruct,
+                                               const tts_params & params) {
+    tts_result result;
+    if (instruct.empty()) {
+        result.error_msg = "Voice design requires a non-empty instruct";
+        return result;
+    }
+    if (text.empty()) {
+        result.error_msg = "Text is empty";
+        return result;
+    }
+    return synthesize_internal(text, nullptr, params, result, instruct);
+}
+
 tts_result Qwen3TTS::synthesize_internal(const std::string & text,
                                           const float * speaker_embedding,
                                           const tts_params & params,
-                                          tts_result & result) {
+                                          tts_result & result,
+                                          const std::string & instruct) {
     int64_t t_total_start = get_time_ms();
     auto sample_memory = [&](const char * stage) {
         process_memory_snapshot mem;
@@ -416,7 +432,34 @@ tts_result Qwen3TTS::synthesize_internal(const std::string & text,
     transformer_.clear_kv_cache();
     
     std::vector<int32_t> speech_codes;
-    if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
+    if (!instruct.empty()) {
+        // Voice design: instruct user-turn prepended, no speaker embedding
+        // (Python generate_voice_design: instruct_ids + speaker_embed=None)
+        std::vector<int32_t> instruct_tokens = tokenizer_.encode_for_instruct(instruct);
+        if (instruct_tokens.empty()) {
+            result.error_msg = "Failed to tokenize instruct";
+            return result;
+        }
+        if (params.print_progress) {
+            fprintf(stderr, "Instruct tokenized: %zu tokens: ", instruct_tokens.size());
+            for (size_t i = 0; i < std::min(instruct_tokens.size(), (size_t)8); ++i) {
+                fprintf(stderr, "%d ", instruct_tokens[i]);
+            }
+            fprintf(stderr, "...\n");
+        }
+        // No reference audio in voice-design mode: tempo prior from a fixed
+        // speaking rate (~0.9 codec frames per character, 12.5 Hz frames)
+        const int32_t target_frames = std::max<int32_t>(8, (int32_t)(text.size() * 0.9f * 5.0f / 4.0f));
+        if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
+                                   nullptr, params.max_audio_tokens, speech_codes,
+                                   params.language_id, params.repetition_penalty,
+                                   params.temperature, params.top_k,
+                                   instruct_tokens.data(), (int32_t)instruct_tokens.size(),
+                                   params.eos_bias, target_frames)) {
+            result.error_msg = "Failed to generate speech codes: " + transformer_.get_error();
+            return result;
+        }
+    } else if (!transformer_.generate(text_tokens.data(), (int32_t)text_tokens.size(),
                                speaker_embedding, params.max_audio_tokens, speech_codes,
                                params.language_id, params.repetition_penalty,
                                params.temperature, params.top_k)) {

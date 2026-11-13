@@ -290,6 +290,37 @@ std::vector<int32_t> TextTokenizer::encode(const std::string & text) const {
     return tokens;
 }
 
+std::vector<int32_t> TextTokenizer::encode_for_instruct(const std::string & instruct) const {
+    if (!loaded_) {
+        return {};
+    }
+
+    // Format: <|im_start|>user\n{instruct}<|im_end|>\n
+    std::vector<int32_t> tokens;
+
+    // <|im_start|>
+    tokens.push_back(config_.bos_token_id);
+
+    // user (plain BPE — matches the processor's tokenization of the template)
+    auto user_tokens = encode("user");
+    tokens.insert(tokens.end(), user_tokens.begin(), user_tokens.end());
+
+    // \n
+    tokens.push_back(newline_token_id_);
+
+    // instruct text
+    auto text_tokens = encode(instruct);
+    tokens.insert(tokens.end(), text_tokens.begin(), text_tokens.end());
+
+    // <|im_end|>
+    tokens.push_back(config_.eos_token_id);
+
+    // \n
+    tokens.push_back(newline_token_id_);
+
+    return tokens;
+}
+
 std::vector<int32_t> TextTokenizer::encode_for_tts(const std::string & text) const {
     if (!loaded_) {
         return {};
