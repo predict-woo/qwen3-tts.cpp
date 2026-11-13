@@ -1716,6 +1716,12 @@ struct ggml_cgraph * TTSTransformer::build_step_graph(int32_t n_past) {
         KQ = ggml_scale(ctx0, KQ, KQscale);
         KQ = ggml_diag_mask_inf(ctx0, KQ, n_past);
         KQ = ggml_soft_max(ctx0, KQ);
+        if (attn_dump_ && il == attn_dump_layer_) {
+            char aname[24];
+            snprintf(aname, sizeof(aname), "step_attn_%d", il);
+            ggml_set_name(KQ, aname);
+            ggml_set_output(KQ);
+        }
         
         V = ggml_cont(ctx0, ggml_transpose(ctx0, V));
         
@@ -2476,6 +2482,21 @@ bool TTSTransformer::forward_step(const float * step_embd, int32_t n_past,
     output.resize(model_.config.codec_vocab_size);
     ggml_backend_tensor_get(logits, output.data(), 0, output.size() * sizeof(float));
     
+    if (attn_dump_) {
+        // dump the selected layer's post-softmax KQ row: [n_kv × n_head],
+        // heads live in ne[2]; flat data is head-major blocks of n_kv
+        char aname[24];
+        snprintf(aname, sizeof(aname), "step_attn_%d", attn_dump_layer_);
+        struct ggml_tensor * attn = ggml_graph_get_tensor(gf, aname);
+        if (attn) {
+            const int32_t n_kv_a = (int32_t)attn->ne[0];
+            const int32_t n_head_a = (int32_t)(attn->ne[1] * attn->ne[2]);
+            std::vector<float> raw((size_t)n_kv_a * n_head_a);
+            ggml_backend_tensor_get(attn, raw.data(), 0, raw.size() * sizeof(float));
+            attn_rows_.push_back(std::move(raw));
+        }
+    }
+    
     state_.cache.n_used = n_past + 1;
     
     ggml_backend_sched_reset(state_.sched);
@@ -2954,6 +2975,35 @@ bool TTSTransformer::predict_codes_autoregressive(const float * hidden, int32_t 
     return true;
 }
 
+bool TTSTransformer::write_attn_dump() {
+    if (!attn_dump_ || attn_dump_path_.empty() || attn_rows_.empty()) {
+        return true;
+    }
+    FILE * f = fopen(attn_dump_path_.c_str(), "wb");
+    if (!f) {
+        fprintf(stderr, "attn-dump: cannot open %s for writing\n", attn_dump_path_.c_str());
+        return false;
+    }
+    const int32_t n_head = (int32_t)model_.config.n_attention_heads;
+    const uint32_t magic = 0x41545444u; // 'ATTD'
+    const int32_t version = 1;
+    const int32_t n_rows = (int32_t)attn_rows_.size();
+    fwrite(&magic, sizeof(uint32_t), 1, f);
+    fwrite(&version, sizeof(int32_t), 1, f);
+    fwrite(&attn_dump_layer_, sizeof(int32_t), 1, f);
+    fwrite(&n_head, sizeof(int32_t), 1, f);
+    fwrite(&n_rows, sizeof(int32_t), 1, f);
+    for (const auto & row : attn_rows_) {
+        const int32_t n_kv = (int32_t)(row.size() / n_head);
+        fwrite(&n_kv, sizeof(int32_t), 1, f);
+        fwrite(row.data(), sizeof(float), row.size(), f);
+    }
+    fclose(f);
+    fprintf(stderr, "attn-dump: wrote %d rows (layer %d, %d heads) to %s\n",
+            n_rows, attn_dump_layer_, n_head, attn_dump_path_.c_str());
+    return true;
+}
+
 bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                const float * speaker_embd, int32_t max_len,
                                std::vector<int32_t> & output,
@@ -2973,6 +3023,9 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     auto t0 = t_gen_start, t1 = t_gen_start;
     timing_ = &timing;
 #endif
+
+    // Attention dump state must not leak across generate() calls
+    attn_rows_.clear();
 
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
@@ -3307,6 +3360,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     }
 #endif
 
+    write_attn_dump();
+
         return true;
 }
 
@@ -3322,6 +3377,9 @@ bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
                                    float eos_bias,
                                    int32_t target_frames,
                                    bool rep_loop_detect) {
+    // Attention dump state must not leak across generate_icl() calls
+    attn_rows_.clear();
+
     if (!model_.ctx) {
         error_msg_ = "Model not loaded";
         return false;
@@ -3581,6 +3639,8 @@ bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
         }
     }
 #endif
+
+    write_attn_dump();
 
         return true;
 }
