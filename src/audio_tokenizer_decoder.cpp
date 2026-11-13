@@ -943,6 +943,36 @@ bool AudioTokenizerDecoder::is_primary_backend_cuda() const {
     return reg_name && strcmp(reg_name, "CUDA") == 0;
 }
 
+bool AudioTokenizerDecoder::decode_window(const int32_t * codes, int32_t n_frames,
+                                          int32_t start_frame, int32_t end_frame,
+                                          int32_t context_frames,
+                                          std::vector<float> & out_new) {
+    if (!model_.ctx) {
+        error_msg_ = "Model not loaded";
+        return false;
+    }
+    if (start_frame < 0 || end_frame <= start_frame || end_frame > n_frames) {
+        error_msg_ = "decode_window: invalid frame range";
+        return false;
+    }
+    const auto & cfg = model_.config;
+    const int32_t ctx_start = std::max(0, start_frame - std::max(0, context_frames));
+    const int32_t seg_frames = end_frame - ctx_start;
+
+    std::vector<float> seg_samples;
+    if (!decode_single(codes + (size_t)ctx_start * cfg.n_codebooks, seg_frames,
+                       ctx_start, seg_samples)) {
+        return false;
+    }
+    // discard the warmup output: samples belonging to [ctx_start, start_frame)
+    const int64_t drop = output_samples_for_frames(start_frame - ctx_start);
+    const size_t keep_from = (size_t)std::min<int64_t>(drop, (int64_t)seg_samples.size());
+    out_new.insert(out_new.end(),
+                   seg_samples.begin() + (std::vector<float>::difference_type)keep_from,
+                   seg_samples.end());
+    return true;
+}
+
 bool AudioTokenizerDecoder::decode_chunked_cuda(const int32_t * codes, int32_t n_frames,
                                                 std::vector<float> & samples,
                                                 int32_t max_gpu_frames, int32_t context_frames_cfg) {

@@ -55,6 +55,8 @@ class Qwen3TTSConverter:
         "talker.text_projection.linear_fc2.bias": "talker.text_proj.fc2.bias",
         # Code Predictor - Output norm
         "talker.code_predictor.model.norm.weight": "code_pred.output_norm.weight",
+        "talker.code_predictor.small_to_mtp_projection.weight": "code_pred.mtp_proj.weight",
+        "talker.code_predictor.small_to_mtp_projection.bias": "code_pred.mtp_proj.bias",
         # Speaker Encoder - Initial conv
         "speaker_encoder.blocks.0.conv.weight": "spk_enc.conv0.weight",
         "speaker_encoder.blocks.0.conv.bias": "spk_enc.conv0.bias",
@@ -177,6 +179,9 @@ class Qwen3TTSConverter:
         # Code Predictor parameters
         self.code_predictor_num_layers = code_predictor_config.get("num_hidden_layers", 5)
         self.code_predictor_vocab_size = code_predictor_config.get("vocab_size", 2048)
+        self.code_predictor_hidden_size = code_predictor_config.get("hidden_size", 1024)
+        self.code_predictor_intermediate_size = code_predictor_config.get("intermediate_size", 3072)
+        self.code_predictor_rope_theta = code_predictor_config.get("rope_theta", 1000000)
 
         # Speaker Encoder parameters
         self.speaker_enc_dim = speaker_encoder_config.get("enc_dim", 1024)
@@ -187,8 +192,8 @@ class Qwen3TTSConverter:
         self.codec_bos_id = talker_config.get("codec_bos_id", 2149)
         self.codec_eos_id = talker_config.get("codec_eos_token_id", 2150)
 
-        # Model name
-        self.model_name = "Qwen3-TTS-12Hz-0.6B"
+        # Model name (derived from talker width)
+        self.model_name = "Qwen3-TTS-12Hz-1.7B" if self.hidden_size > 1024 else "Qwen3-TTS-12Hz-0.6B"
 
     def _map_tensor_name(self, hf_name: str) -> str | None:
         """Map HuggingFace tensor name to GGML convention."""
@@ -460,6 +465,9 @@ class Qwen3TTSConverter:
         # Code Predictor parameters
         writer.add_uint32(f"{arch}.code_predictor.layer_count", self.code_predictor_num_layers)
         writer.add_uint32(f"{arch}.code_predictor.vocab_size", self.code_predictor_vocab_size)
+        writer.add_uint32(f"{arch}.code_predictor.embedding_length", self.code_predictor_hidden_size)
+        writer.add_uint32(f"{arch}.code_predictor.feed_forward_length", self.code_predictor_intermediate_size)
+        writer.add_float32(f"{arch}.code_predictor.rope.freq_base", self.code_predictor_rope_theta)
 
         # Speaker Encoder parameters
         writer.add_uint32(f"{arch}.speaker_encoder.embedding_length", self.speaker_enc_dim)

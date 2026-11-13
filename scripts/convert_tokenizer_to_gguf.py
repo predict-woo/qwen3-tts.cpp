@@ -327,9 +327,12 @@ class Qwen3TTSTokenizerConverter:
         all_tensors = list(self._get_tensors())
         
         # First pass: collect codebook pairs
+        # NOTE: encoder (Mimi) uses "embed_sum", decoder (WavTokenizer)
+        # uses "embedding_sum" — "embed_sum" is NOT a substring of
+        # "embedding_sum" ("embed" + "ding_sum"), so test both explicitly.
         for hf_name, tensor in all_tensors:
-            if "embedding_sum" in hf_name:
-                base_name = hf_name.replace("embedding_sum", "")
+            if "embed_sum" in hf_name or "embedding_sum" in hf_name:
+                base_name = hf_name.replace("embedding_sum", "").replace("embed_sum", "")
                 if base_name not in codebook_pairs:
                     codebook_pairs[base_name] = {}
                 codebook_pairs[base_name]["embedding_sum"] = tensor
@@ -352,9 +355,10 @@ class Qwen3TTSTokenizerConverter:
                 skipped_count += 1
                 continue
             
-            # For embedding_sum, compute actual codebook = embedding_sum / cluster_usage
-            if "embedding_sum" in hf_name:
-                base_name = hf_name.replace("embedding_sum", "")
+            # For embed_sum/embedding_sum, compute actual codebook = sum / usage
+            # (encoder Mimi names it embed_sum; decoder WavTokenizer: embedding_sum)
+            if "embed_sum" in hf_name or "embedding_sum" in hf_name:
+                base_name = hf_name.replace("embedding_sum", "").replace("embed_sum", "")
                 if base_name in codebook_pairs and "cluster_usage" in codebook_pairs[base_name]:
                     embedding_sum = codebook_pairs[base_name]["embedding_sum"]
                     cluster_usage = codebook_pairs[base_name]["cluster_usage"]

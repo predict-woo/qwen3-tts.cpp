@@ -326,7 +326,8 @@ int main(int argc, char ** argv) {
                 } else if (cos_sim > 0.90f) {
                     test_warn("Logits partially match reference (cosine > 0.90)");
                 } else {
-                    test_warn("Logits diverge from reference");
+                    fail_count++;
+                    printf("  FAIL: Logits diverge from reference (cosine <= 0.90)\n");
                 }
             } else {
                 test_warn("Skipped logits comparison -- missing reference or output data");
@@ -447,12 +448,19 @@ int main(int argc, char ** argv) {
                        cmp_frames > 0 ? 100.0f * per_codebook_matches[cb] / cmp_frames : 0.0f);
             }
 
+            // Full-frame exact match is only achievable with F32 weights:
+            // the code predictor's per-codebook argmax flips on near-ties
+            // under F16 quantization (observed: CB0 76% match, CB1-15 ~5%).
+            // The talker-level CB0 stream is the quantization-robust signal.
+            int cb0_matches = per_codebook_matches[0];
             if (matching_frames == cmp_frames && n_gen_frames == ref_frames) {
                 test_pass("All speech codes match reference exactly!");
-            } else if (matching_frames > cmp_frames / 2) {
-                test_warn("Partial match -- see statistics above");
+            } else if (cb0_matches >= cmp_frames / 2) {
+                test_warn("Talker CB0 stream matches; fine codebooks diverge (F16 quantization)");
             } else {
-                test_warn("Low match rate -- see statistics above");
+                fail_count++;
+                printf("  FAIL: Talker CB0 match rate below 50%% (%d/%d frames)\n",
+                       cb0_matches, cmp_frames);
             }
         } else {
             test_warn("No reference codes available for comparison");
@@ -471,12 +479,13 @@ int main(int argc, char ** argv) {
     printf("  +-------------------------------------+\n\n");
 
     if (fail_count > 0) {
-        printf("=== Some tests FAILED (exit 0 to allow analysis) ===\n");
+        printf("=== Some tests FAILED (exit 1) ===\n");
+        return 1;
     } else if (warn_count > 0) {
         printf("=== All tests passed with warnings ===\n");
     } else {
         printf("=== All tests passed! ===\n");
     }
 
-    return 0;  // Always exit 0 to allow analysis of comparison results
+    return 0;
 }
