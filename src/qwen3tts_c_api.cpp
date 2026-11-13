@@ -38,6 +38,7 @@ struct Qwen3TtsParams {
     int32_t n_threads;
     float   repetition_penalty;
     int32_t language_id;
+    const char * ref_code_path;
 };
 
 struct Qwen3TtsAudio {
@@ -63,6 +64,9 @@ static qwen3_tts::tts_params to_cpp_params(const Qwen3TtsParams * p) {
         params.n_threads         = p->n_threads;
         params.repetition_penalty = p->repetition_penalty;
         params.language_id       = p->language_id;
+        if (p->ref_code_path) {
+            params.ref_code_path = p->ref_code_path;
+        }
     }
     return params;
 }
@@ -96,6 +100,7 @@ void qwen3_tts_default_params(Qwen3TtsParams * params) {
     params->n_threads         = 4;
     params->repetition_penalty = 1.05f;
     params->language_id       = 2050; // en
+    params->ref_code_path     = NULL;
 }
 
 Qwen3Tts * qwen3_tts_create(const char * model_dir, int32_t n_threads) {
@@ -245,4 +250,45 @@ const char * qwen3_tts_get_error(const Qwen3Tts * tts) {
     return tts->last_error.c_str();
 }
 
+
+Qwen3TtsAudio* qwen3_tts_synthesize_in_context(
+    Qwen3Tts* tts,
+    const char* text,
+    const char* reference_audio_path,
+    const char* ref_text,
+    const Qwen3TtsParams* params)
+{
+    if (!tts || !text || !reference_audio_path || !ref_text || !params) return nullptr;
+
+    Qwen3TtsParams p = *params;
+    qwen3_tts::tts_params tp;
+    tp.max_audio_tokens = p.max_audio_tokens;
+    tp.temperature = p.temperature;
+    tp.top_k = p.top_k;
+    tp.repetition_penalty = p.repetition_penalty;
+    tp.language_id = p.language_id;
+    if (p.ref_code_path) {
+        tp.ref_code_path = p.ref_code_path;
+    }
+
+    qwen3_tts::tts_result result = tts->engine.synthesize_in_context(
+        text, reference_audio_path, ref_text, tp);
+
+    if (!result.success || result.audio.empty()) {
+        if (!result.error_msg.empty()) {
+            fprintf(stderr, "[qwen3-tts] ICL synthesis failed: %s\n", result.error_msg.c_str());
+        }
+        return nullptr;
+    }
+
+    Qwen3TtsAudio* audio = new Qwen3TtsAudio();
+    audio->n_samples = (int32_t)result.audio.size();
+    audio->sample_rate = result.sample_rate;
+    audio->samples = new float[result.audio.size()];
+    memcpy((void*)audio->samples, result.audio.data(), result.audio.size() * sizeof(float));
+    return audio;
+}
+
 } // extern "C"
+
+

@@ -4,6 +4,7 @@
 #include "tts_transformer.h"
 #include "audio_tokenizer_encoder.h"
 #include "audio_tokenizer_decoder.h"
+#include "audio_tokenizer_codec_encoder.h"
 
 #include <string>
 #include <vector>
@@ -38,8 +39,15 @@ struct tts_params {
     // Repetition penalty for CB0 token generation (HuggingFace style)
     float repetition_penalty = 1.05f;
 
+    // EOS logit bias for ICL generation (combats babble-past-end on 1.7B)
+    float eos_bias = 0.0f;
+
     // Language ID for codec (2050=en, 2069=ru, 2055=zh, 2058=ja, 2064=ko, 2053=de, 2061=fr, 2054=es)
     int32_t language_id = 2050;
+
+    // Path to pre-computed codec tokens for ICL (one integer per line,
+    // 16 per frame). When set, bypasses the C++ codec encoder entirely.
+    std::string ref_code_path;
 
 };
 
@@ -126,6 +134,16 @@ public:
                                           const float * embedding, int32_t embedding_size,
                                           const tts_params & params = tts_params());
 
+    /// Generate speech with in-context voice cloning (ICL mode).
+    /// Combines speaker embedding + reference codec tokens + transcript
+    /// for accent/prosody-preserving cloning (not just timbre).
+    /// reference_audio: path to reference audio file (WAV, 24kHz)
+    /// reference_text: transcript of the reference audio
+    tts_result synthesize_in_context(const std::string & text,
+                                      const std::string & reference_audio,
+                                      const std::string & reference_text,
+                                      const tts_params & params = tts_params());
+
     // Set progress callback
     void set_progress_callback(tts_progress_callback_t callback);
     
@@ -140,11 +158,21 @@ private:
                                    const float * speaker_embedding,
                                    const tts_params & params,
                                    tts_result & result);
+
+    tts_result synthesize_icl_internal(const std::string & text,
+                                        const float * speaker_embedding,
+                                        const int32_t * ref_codec_tokens,
+                                        int32_t n_ref_frames,
+                                        const std::string & reference_text,
+                                        const tts_params & params,
+                                        tts_result & result);
     
     TextTokenizer tokenizer_;
     TTSTransformer transformer_;
     AudioTokenizerEncoder audio_encoder_;
     AudioTokenizerDecoder audio_decoder_;
+    CodecEncoder codec_encoder_;  // Mimi encoder (audio → codec tokens for ICL)
+    bool codec_encoder_loaded_ = false;
     
     bool models_loaded_ = false;
     bool encoder_loaded_ = false;

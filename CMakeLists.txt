@@ -132,6 +132,22 @@ if(GGML_HAS_METAL)
 endif()
 
 # Audio tokenizer decoder library (GGML-based)
+add_library(codec_encoder STATIC
+    src/audio_tokenizer_codec_encoder.cpp
+    src/gguf_loader.cpp
+)
+target_include_directories(codec_encoder PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${GGML_DIR}/include
+)
+target_link_directories(codec_encoder PUBLIC
+    ${GGML_BUILD_DIR}/src
+)
+target_link_libraries(codec_encoder PUBLIC
+    ggml
+    ggml-base
+)
+
 add_library(audio_tokenizer_decoder STATIC
     src/audio_tokenizer_decoder.cpp
     src/gguf_loader.cpp
@@ -167,6 +183,7 @@ target_link_libraries(qwen3_tts PUBLIC
     tts_transformer
     audio_tokenizer_encoder
     audio_tokenizer_decoder
+    codec_encoder
     Threads::Threads
 )
 if(WIN32)
@@ -230,6 +247,14 @@ add_executable(test_decoder
 )
 target_link_libraries(test_decoder PRIVATE
     audio_tokenizer_decoder
+    Threads::Threads
+)
+
+add_executable(test_codec_encoder
+    tests/test_codec_encoder.cpp
+)
+target_link_libraries(test_codec_encoder PRIVATE
+    codec_encoder
     Threads::Threads
 )
 

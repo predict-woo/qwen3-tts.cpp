@@ -305,6 +305,23 @@ bool TTSTransformer::parse_config(struct gguf_context * ctx) {
         "qwen3-tts.code_pred.vocab_size",
         "qwen3-tts.code_predictor.vocab_size",
     }, 2048);
+    cfg.code_pred_hidden_size = get_u32_any({
+        "qwen3-tts.code_pred.embedding_length",
+        "qwen3-tts.code_predictor.embedding_length",
+    }, 1024);
+    cfg.code_pred_intermediate_size = get_u32_any({
+        "qwen3-tts.code_pred.feed_forward_length",
+        "qwen3-tts.code_predictor.feed_forward_length",
+    }, 3072);
+    // Fall back to the talker freq_base: GGUFs converted before this field
+    // existed have no code_predictor.rope.freq_base, and both HF configs
+    // (0.6B and 1.7B) set code_predictor_config.rope_theta to the same
+    // 1000000 as the talker. Defaulting to 10000 would silently run every
+    // pre-existing GGUF with the wrong theta.
+    cfg.code_pred_rope_theta = get_f32_any({
+        "qwen3-tts.code_pred.rope.freq_base",
+        "qwen3-tts.code_predictor.rope.freq_base",
+    }, cfg.rope_theta);
 
     cfg.codec_pad_id = get_u32_any({
         "qwen3-tts.codec.pad_id",
@@ -476,12 +493,14 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
             if (skip_ggml_code_pred_layers_) {
                 continue;
             }
+            const int32_t cp_hidden = cfg.code_pred_hidden_size;
+            const int32_t cp_inter  = cfg.code_pred_intermediate_size;
             int layer_idx = -1;
             if (sscanf(name, "code_pred.blk.%d.", &layer_idx) == 1 && 
                 layer_idx >= 0 && layer_idx < cfg.code_pred_layers) {
                 
                 if (strstr(name, "attn_norm.weight")) {
-                    ne[0] = cfg.hidden_size;
+                    ne[0] = cp_hidden;
                     n_dims = 1;
                 } else if (strstr(name, "attn_q_norm.weight")) {
                     ne[0] = cfg.head_dim;
@@ -490,35 +509,35 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
                     ne[0] = cfg.head_dim;
                     n_dims = 1;
                 } else if (strstr(name, "attn_q.weight")) {
-                    ne[0] = cfg.hidden_size;
+                    ne[0] = cp_hidden;
                     ne[1] = cfg.n_attention_heads * cfg.head_dim;
                     n_dims = 2;
                 } else if (strstr(name, "attn_k.weight")) {
-                    ne[0] = cfg.hidden_size;
+                    ne[0] = cp_hidden;
                     ne[1] = cfg.n_key_value_heads * cfg.head_dim;
                     n_dims = 2;
                 } else if (strstr(name, "attn_v.weight")) {
-                    ne[0] = cfg.hidden_size;
+                    ne[0] = cp_hidden;
                     ne[1] = cfg.n_key_value_heads * cfg.head_dim;
                     n_dims = 2;
                 } else if (strstr(name, "attn_output.weight")) {
                     ne[0] = cfg.n_attention_heads * cfg.head_dim;
-                    ne[1] = cfg.hidden_size;
+                    ne[1] = cp_hidden;
                     n_dims = 2;
                 } else if (strstr(name, "ffn_norm.weight")) {
-                    ne[0] = cfg.hidden_size;
+                    ne[0] = cp_hidden;
                     n_dims = 1;
                 } else if (strstr(name, "ffn_gate.weight")) {
-                    ne[0] = cfg.hidden_size;
-                    ne[1] = cfg.intermediate_size;
+                    ne[0] = cp_hidden;
+                    ne[1] = cp_inter;
                     n_dims = 2;
                 } else if (strstr(name, "ffn_up.weight")) {
-                    ne[0] = cfg.hidden_size;
-                    ne[1] = cfg.intermediate_size;
+                    ne[0] = cp_hidden;
+                    ne[1] = cp_inter;
                     n_dims = 2;
                 } else if (strstr(name, "ffn_down.weight")) {
-                    ne[0] = cfg.intermediate_size;
-                    ne[1] = cfg.hidden_size;
+                    ne[0] = cp_inter;
+                    ne[1] = cp_hidden;
                     n_dims = 2;
                 } else {
                     continue;
@@ -526,6 +545,13 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
             } else {
                 continue;
             }
+        } else if (strstr(name, "code_pred.mtp_proj.weight")) {
+            ne[0] = cfg.hidden_size;              // talker hidden (input dim)
+            ne[1] = cfg.code_pred_hidden_size;    // code predictor hidden (output dim)
+            n_dims = 2;
+        } else if (strstr(name, "code_pred.mtp_proj.bias")) {
+            ne[0] = cfg.code_pred_hidden_size;
+            n_dims = 1;
         } else if (strstr(name, "code_pred.codec_embd.")) {
             int cb_idx = -1;
             if (sscanf(name, "code_pred.codec_embd.%d.weight", &cb_idx) == 1 &&
@@ -543,7 +569,7 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
              int cb_idx = -1;
              if (sscanf(name, "code_pred.lm_head.%d.weight", &cb_idx) == 1 &&
                  cb_idx >= 0 && cb_idx < cfg.n_codebooks - 1) {
-                 ne[0] = cfg.hidden_size;
+                 ne[0] = cfg.code_pred_hidden_size;
                  ne[1] = cfg.code_pred_vocab_size;
                  n_dims = 2;
              } else {
@@ -553,7 +579,7 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
              if (skip_ggml_code_pred_layers_) {
                  continue;
              }
-             ne[0] = cfg.hidden_size;
+             ne[0] = cfg.code_pred_hidden_size;
              n_dims = 1;
          } else {
              continue;
@@ -617,12 +643,16 @@ bool TTSTransformer::create_tensors(struct gguf_context * ctx) {
                 else if (strstr(name, "ffn_up.weight")) layer.ffn_up = tensor;
                 else if (strstr(name, "ffn_down.weight")) layer.ffn_down = tensor;
             }
-        } else if (strstr(name, "code_pred.codec_embd.")) {
-            int cb_idx = -1;
-            sscanf(name, "code_pred.codec_embd.%d.weight", &cb_idx);
-            if (cb_idx >= 0 && cb_idx < cfg.n_codebooks - 1) {
-                model_.code_pred_embd[cb_idx] = tensor;
-            }
+         } else if (strstr(name, "code_pred.mtp_proj.weight")) {
+             model_.code_pred_mtp_proj_w = tensor;
+         } else if (strstr(name, "code_pred.mtp_proj.bias")) {
+             model_.code_pred_mtp_proj_b = tensor;
+         } else if (strstr(name, "code_pred.codec_embd.")) {
+             int cb_idx = -1;
+             sscanf(name, "code_pred.codec_embd.%d.weight", &cb_idx);
+             if (cb_idx >= 0 && cb_idx < cfg.n_codebooks - 1) {
+                 model_.code_pred_embd[cb_idx] = tensor;
+             }
          } else if (strstr(name, "code_pred.lm_head.")) {
              int cb_idx = -1;
              sscanf(name, "code_pred.lm_head.%d.weight", &cb_idx);
@@ -1137,6 +1167,292 @@ bool TTSTransformer::build_prefill_graph(const int32_t * text_tokens, int32_t n_
     return true;
 }
 
+bool TTSTransformer::build_prefill_graph_icl(
+    const int32_t * text_tokens, int32_t n_tokens,
+    const int32_t * ref_text_tokens, int32_t n_ref_text,
+    const int32_t * ref_codec_tokens, int32_t n_ref_frames,
+    const float * speaker_embd, int32_t /*language_id*/,  // ICL prefill has no language token
+    std::vector<float> & prefill_embd,
+    std::vector<float> & trailing_text_hidden,
+    std::vector<float> & tts_pad_embed)
+{
+    if (!text_tokens || n_tokens < 4) {
+        error_msg_ = "ICL: need at least 4 target text tokens";
+        return false;
+    }
+    if (!ref_codec_tokens || n_ref_frames < 1) {
+        error_msg_ = "ICL: need at least 1 reference codec frame";
+        return false;
+    }
+
+    const auto & cfg = model_.config;
+    const int32_t hidden_size = cfg.hidden_size;
+
+    // ── Build the base prefix (identical to x-vector mode, 9 tokens) ──
+    // This is the same code as build_prefill_graph positions 0-8
+    int32_t special_tokens[3] = {
+        cfg.tts_bos_token_id,
+        cfg.tts_eos_token_id,
+        cfg.tts_pad_token_id,
+    };
+
+    std::vector<float> special_proj;
+    if (!project_text_tokens(special_tokens, 3, special_proj)) {
+        return false;
+    }
+
+    std::vector<float> tts_bos_embed(hidden_size);
+    std::vector<float> tts_eos_embed(hidden_size);
+    tts_pad_embed.resize(hidden_size);
+    memcpy(tts_bos_embed.data(), special_proj.data() + 0 * hidden_size, hidden_size * sizeof(float));
+    memcpy(tts_eos_embed.data(), special_proj.data() + 1 * hidden_size, hidden_size * sizeof(float));
+    memcpy(tts_pad_embed.data(), special_proj.data() + 2 * hidden_size, hidden_size * sizeof(float));
+
+    // Role tokens (first 3 tokens of the chat template)
+    std::vector<float> role_embed;
+    if (!project_text_tokens(text_tokens, 3, role_embed)) {
+        return false;
+    }
+
+    // Codec prefill tokens — ICL mode: NO language token (3 tokens)
+    // to match Python's generate_voice_clone which uses the no-language
+    // path. Adding language_id shifts everything by 1 and breaks alignment.
+    std::vector<int32_t> codec_prefill_tokens = {
+        cfg.codec_nothink_id,
+        cfg.codec_think_bos_id,
+        cfg.codec_think_eos_id,
+    };
+    std::vector<float> codec_prefill_embed;
+    if (!lookup_embedding_rows(model_.codec_embd, codec_prefill_tokens.data(),
+                               (int32_t)codec_prefill_tokens.size(),
+                               "icl_codec_prefill", "icl_codec_prefill_rows",
+                               codec_prefill_embed)) {
+        return false;
+    }
+
+    // Codec tail (pad + BOS)
+    int32_t codec_tail_tokens[2] = { cfg.codec_pad_id, cfg.codec_bos_id };
+    std::vector<float> codec_tail_embed;
+    if (!lookup_embedding_rows(model_.codec_embd, codec_tail_tokens, 2,
+                               "icl_codec_tail", "icl_codec_tail_rows",
+                               codec_tail_embed)) {
+        return false;
+    }
+
+    // Assemble base prefix embedding (9 positions)
+    const bool has_speaker = (speaker_embd != nullptr);
+    const int32_t codec_input_len = (int32_t)codec_prefill_tokens.size() + (has_speaker ? 1 : 0) + 2;
+    {
+        std::vector<float> codec_input_embedding((size_t)codec_input_len * hidden_size);
+        int32_t dst = 0;
+        memcpy(codec_input_embedding.data(), codec_prefill_embed.data(),
+               codec_prefill_embed.size() * sizeof(float));
+        dst += (int32_t)codec_prefill_tokens.size();
+        if (has_speaker) {
+            memcpy(codec_input_embedding.data() + (size_t)dst * hidden_size,
+                   speaker_embd, hidden_size * sizeof(float));
+            ++dst;
+        }
+        memcpy(codec_input_embedding.data() + (size_t)dst * hidden_size,
+               codec_tail_embed.data(), codec_tail_embed.size() * sizeof(float));
+
+        // Overlay: TTS pad on all but last, TTS BOS on last
+        const int32_t overlay_len = codec_input_len - 1;
+        std::vector<float> codec_plus_overlay((size_t)overlay_len * hidden_size);
+        for (int32_t t = 0; t < overlay_len; t++) {
+            const float * overlay = (t == overlay_len - 1) ? tts_bos_embed.data() : tts_pad_embed.data();
+            const float * codec_row = codec_input_embedding.data() + (size_t)t * hidden_size;
+            float * out_row = codec_plus_overlay.data() + (size_t)t * hidden_size;
+            for (int32_t h = 0; h < hidden_size; h++) {
+                out_row[h] = overlay[h] + codec_row[h];
+            }
+        }
+
+        // Base prefix: [role(3)] [codec_plus_overlay]
+        const int32_t base_prefix_len = 3 + overlay_len;
+        prefill_embd.resize((size_t)base_prefix_len * hidden_size);
+        memcpy(prefill_embd.data(), role_embed.data(), role_embed.size() * sizeof(float));
+        memcpy(prefill_embd.data() + (size_t)3 * hidden_size,
+               codec_plus_overlay.data(), codec_plus_overlay.size() * sizeof(float));
+
+        // NO fused transition — Python goes directly from base prefix
+        // to ICL context. The first ICL position (position 8) has
+        // text[0] + codec_bos (handled by the codec_bos prepend in the
+        // codec stream).
+    }
+
+    // ── Build the ICL context: additive interleaving of text ⊕ codec ──
+    //
+    // Text stream: ref_text[3:-5] + target_text[3:-5] + tts_eos
+    //   (strip chat template from both: 3-token role prefix and the
+    //   5-token tail <|im_end|> \n <|im_start|> assistant \n)
+    // Codec stream: codec_bos + Σₖ embedding(ref_code[:,k]) per frame
+    //
+    // Per-position: text_proj(text[i]) + codec_embedding[i]
+    // If text longer: leftover text becomes trailing (with tts_pad)
+    // If codec longer: codec frames without text get tts_pad overlay
+
+    // encode_for_tts emits a 5-token tail: <|im_end|> \n <|im_start|> assistant \n
+    // Strip all 5 to get the clean transcript (matches Python's [:, 3:-5])
+    int32_t ref_text_start = 3; // skip <|im_start|>, assistant, \n
+    int32_t ref_text_end = n_ref_text - 5;
+    if (ref_text_end < ref_text_start) ref_text_end = ref_text_start;
+
+    int32_t target_start = 3; // skip role tokens from target
+    int32_t target_end = n_tokens - 5;
+    if (target_end < target_start) target_end = target_start;
+
+    std::vector<int32_t> combined_text;
+    for (int32_t i = ref_text_start; i < ref_text_end && i < n_ref_text; i++) {
+        combined_text.push_back(ref_text_tokens[i]);
+    }
+    for (int32_t i = target_start; i < target_end && i < n_tokens; i++) {
+        combined_text.push_back(text_tokens[i]);
+    }
+    combined_text.push_back(cfg.tts_eos_token_id); // text stream ends with EOS
+
+    // Prepare codec embeddings: codec_bos PREPENDED + reference frames
+    // (Python line 1989: codec_embed = cat([codec_bos_embed, codec_embed], dim=1))
+    // So the codec stream is [codec_bos, frame0, frame1, ..., frameN]
+    // making it (n_ref_frames + 1) positions long.
+    int32_t n_codec_total = n_ref_frames + 1;  // +1 for codec_bos
+    std::vector<float> codec_frame_embeds((size_t)n_codec_total * hidden_size, 0.0f);
+    {
+        // Position 0: codec_bos embedding from the talker's codec_embd
+        {
+            float * dst = codec_frame_embeds.data();
+            if (!lookup_single_embedding_row(model_.codec_embd, cfg.codec_bos_id, dst)) {
+                return false;
+            }
+        }
+
+        // Positions 1+: reference codec frames
+        for (int32_t f = 0; f < n_ref_frames; f++) {
+            float * dst = codec_frame_embeds.data() + (size_t)(f + 1) * hidden_size;
+
+            // cb0: talker.codec_embd
+            int32_t cb0_token = ref_codec_tokens[(size_t)f * 16 + 0];
+            if (!lookup_single_embedding_row(model_.codec_embd, cb0_token, dst)) {
+                return false;
+            }
+
+            // cb1-15: sum into the same row (using code_pred_embd, matching
+            // the generation-time embedding lookups exactly)
+            for (int32_t cb = 1; cb < 16 && cb < cfg.n_codebooks; cb++) {
+                int32_t token = ref_codec_tokens[(size_t)f * 16 + cb];
+                std::vector<float> cb_row(hidden_size);
+                if (!lookup_single_embedding_row(model_.code_pred_embd[cb - 1], token, cb_row.data())) {
+                    return false;
+                }
+                for (int32_t h = 0; h < hidden_size; h++) {
+                    dst[h] += cb_row[h];
+                }
+            }
+        }
+    }
+
+    // Interleave: text ⊕ codec with element-wise addition
+    int32_t n_text = (int32_t)combined_text.size();
+    int32_t n_codec = n_ref_frames;
+    int32_t icl_len = 0; // set to the codec length once codec_bos is included below
+
+    // Project all text tokens at once
+    std::vector<float> text_proj_all;
+    if (n_text > 0) {
+        if (!project_text_tokens(combined_text.data(), n_text, text_proj_all)) {
+            return false;
+        }
+    }
+
+    // Build the interleaved context
+    // Each position: text_proj[text[i]] + codec_embed[i] (if both exist)
+    //                text_proj[text[i]] + tts_pad       (if only text)
+    //                tts_pad + codec_embed[i]            (if only codec)
+    // Use n_codec_total (includes codec_bos) for interleaving
+    n_codec = n_codec_total;
+    // Python (lines 2014-2018): the interleave never extends past the codec
+    // stream. When codec > text, text is padded with tts_pad up to the codec
+    // length; when text > codec, only text[:n_codec] is interleaved and the
+    // excess becomes trailing text for the generation steps — it is NOT
+    // appended to the prefill with no codec/pad embedding.
+    icl_len = n_codec;
+
+    // Interleaving (Python lines 2014-2018):
+    //   if text > codec: text[:codec_len] + codec, then text[codec_len:] as trailing
+    //   if codec > text: text padded with tts_pad to codec length, then text + codec
+    std::vector<float> icl_embed((size_t)icl_len * hidden_size, 0.0f);
+    for (int32_t i = 0; i < icl_len; i++) {
+        float * dst = icl_embed.data() + (size_t)i * hidden_size;
+
+        // Text embedding or tts_pad filler
+        if (i < n_text) {
+            const float * trow = text_proj_all.data() + (size_t)i * hidden_size;
+            for (int32_t h = 0; h < hidden_size; h++) {
+                dst[h] += trow[h];
+            }
+        } else {
+            // Text ran out — Python pads with tts_pad (line 2017)
+            for (int32_t h = 0; h < hidden_size; h++) {
+                dst[h] += tts_pad_embed[h];
+            }
+        }
+
+        // Codec embedding (i < n_codec always holds: the interleave is
+        // capped at the codec length)
+        {
+            const float * crow = codec_frame_embeds.data() + (size_t)i * hidden_size;
+            for (int32_t h = 0; h < hidden_size; h++) {
+                dst[h] += crow[h];
+            }
+        }
+    }
+
+    // Append ICL context to the base prefix
+    size_t base_len = prefill_embd.size() / hidden_size;
+    prefill_embd.resize((base_len + icl_len) * hidden_size);
+    memcpy(prefill_embd.data() + base_len * hidden_size,
+           icl_embed.data(), icl_embed.size() * sizeof(float));
+
+    // Trailing text: excess text tokens past the codec stream, consumed one
+    // row per generated frame (mirrors the Python streaming path's
+    // text_embed[:, codec_lens:] return). Empty when text fits in the prefill.
+    // Sliced from text_proj_all rather than re-projected.
+    trailing_text_hidden.clear();
+    if (n_text > n_codec) {
+        const int32_t trailing_rows = n_text - n_codec;
+        const float * excess = text_proj_all.data() + (size_t)n_codec * hidden_size;
+        trailing_text_hidden.assign(excess, excess + (size_t)trailing_rows * hidden_size);
+    }
+
+    if (debug_dump_) {
+        size_t total_len = prefill_embd.size() / hidden_size;
+        fprintf(stderr, "[ICL-prefill] %zu positions x %d hidden\n", total_len, hidden_size);
+        // Overall stats
+        double sum = 0, sum_sq = 0;
+        for (float v : prefill_embd) { sum += v; sum_sq += (double)v * v; }
+        double mean = sum / prefill_embd.size();
+        double var = sum_sq / prefill_embd.size() - mean * mean;
+        fprintf(stderr, "[ICL-prefill] overall: mean=%.6f std=%.6f\n", mean, sqrt(var));
+
+        // Per-position (key positions matching Python dump)
+        int key_positions[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 50, 60, 70};
+        for (int pos : key_positions) {
+            if ((size_t)pos < total_len) {
+                const float * p = prefill_embd.data() + (size_t)pos * hidden_size;
+                double psum = 0, psq = 0;
+                for (int h = 0; h < hidden_size; h++) { psum += p[h]; psq += (double)p[h] * p[h]; }
+                double pmean = psum / hidden_size;
+                double pstd = sqrt(psq / hidden_size - pmean * pmean);
+                double pnorm = sqrt(psq);
+                fprintf(stderr, "[ICL-prefill] pos %3d: mean=%9.5f std=%9.5f norm=%9.4f\n",
+                        pos, pmean, pstd, pnorm);
+            }
+        }
+    }
+
+    return true;
+}
+
 struct ggml_cgraph * TTSTransformer::build_prefill_forward_graph(int32_t n_tokens, int32_t n_past) {
     const auto & cfg = model_.config;
     const int n_head = cfg.n_attention_heads;
@@ -1433,7 +1749,7 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes)
     const int n_head = cfg.n_attention_heads;
     const int n_kv_head = cfg.n_key_value_heads;
     const int head_dim = cfg.head_dim;
-    const int hidden_size = cfg.hidden_size;
+    const int hidden_size = cfg.hidden_size;               // talker hidden (input dim)
     const float eps = cfg.rms_norm_eps;
     const int n_layer = cfg.code_pred_layers;
     const int n_codebooks = cfg.n_codebooks;
@@ -1465,6 +1781,14 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_graph(int32_t n_prev_codes)
             struct ggml_tensor * code_idx = ggml_view_1d(ctx0, inp_prev_codes, 1, cb * sizeof(int32_t));
             struct ggml_tensor * code_embd = ggml_get_rows(ctx0, model_.code_pred_embd[cb], code_idx);
             cur = ggml_add(ctx0, cur, code_embd);
+        }
+    }
+    
+    // MTP projection: talker hidden -> code predictor hidden (identity when absent)
+    if (model_.code_pred_mtp_proj_w) {
+        cur = ggml_mul_mat(ctx0, model_.code_pred_mtp_proj_w, cur);
+        if (model_.code_pred_mtp_proj_b) {
+            cur = ggml_add(ctx0, cur, model_.code_pred_mtp_proj_b);
         }
     }
     
@@ -1556,8 +1880,9 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
     const int n_kv_head = cfg.n_key_value_heads;
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
+    const int cp_hidden = cfg.code_pred_hidden_size;
     const float eps = cfg.rms_norm_eps;
-    const float rope_theta = cfg.rope_theta;
+    const float rope_theta = cfg.code_pred_rope_theta;
     const int n_layer = cfg.code_pred_layers;
     const int n_tokens = 2;
     
@@ -1588,6 +1913,14 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
     struct ggml_tensor * hidden_2d = ggml_reshape_2d(ctx0, inp_hidden, hidden_size, 1);
     struct ggml_tensor * cb0_2d = ggml_reshape_2d(ctx0, inp_cb0_embd, hidden_size, 1);
     struct ggml_tensor * cur = ggml_concat(ctx0, hidden_2d, cb0_2d, 1);
+    
+    // MTP projection: talker hidden -> code predictor hidden (identity when absent)
+    if (model_.code_pred_mtp_proj_w) {
+        cur = ggml_mul_mat(ctx0, model_.code_pred_mtp_proj_w, cur);
+        if (model_.code_pred_mtp_proj_b) {
+            cur = ggml_add(ctx0, cur, model_.code_pred_mtp_proj_b);
+        }
+    }
     
     struct ggml_tensor * inpL = cur;
     
@@ -1681,8 +2014,8 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_prefill_graph() {
      cur = ggml_rms_norm(ctx0, cur, eps);
      cur = ggml_mul(ctx0, cur, model_.code_pred_output_norm);
      
-     struct ggml_tensor * last_hidden = ggml_view_2d(ctx0, cur, hidden_size, 1, 
-                                                      cur->nb[1], hidden_size * sizeof(float));
+     struct ggml_tensor * last_hidden = ggml_view_2d(ctx0, cur, cp_hidden, 1, 
+                                                      cur->nb[1], cp_hidden * sizeof(float));
      
      struct ggml_tensor * logits = ggml_mul_mat(ctx0, model_.code_pred_head[0], last_hidden);
     ggml_set_name(logits, "logits");
@@ -1702,7 +2035,7 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
     const int head_dim = cfg.head_dim;
     const int hidden_size = cfg.hidden_size;
     const float eps = cfg.rms_norm_eps;
-    const float rope_theta = cfg.rope_theta;
+    const float rope_theta = cfg.code_pred_rope_theta;
     const int n_layer = cfg.code_pred_layers;
     const int n_tokens = 1;
     
@@ -1733,6 +2066,14 @@ struct ggml_cgraph * TTSTransformer::build_code_pred_step_graph(int32_t n_past, 
     } else {
         cur = ggml_get_rows(ctx0, model_.code_pred_embd[generation_step - 1], inp_code);
         cur = ggml_reshape_2d(ctx0, cur, hidden_size, 1);
+    }
+    
+    // MTP projection: talker hidden -> code predictor hidden (identity when absent)
+    if (model_.code_pred_mtp_proj_w) {
+        cur = ggml_mul_mat(ctx0, model_.code_pred_mtp_proj_w, cur);
+        if (model_.code_pred_mtp_proj_b) {
+            cur = ggml_add(ctx0, cur, model_.code_pred_mtp_proj_b);
+        }
     }
     
     struct ggml_tensor * inpL = cur;
@@ -2601,7 +2942,8 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
                                int32_t language_id,
                                float repetition_penalty,
                                float temperature,
-                               int32_t top_k) {
+                               int32_t top_k,
+                               bool rep_loop_detect) {
 #ifdef QWEN3_TTS_TIMING
     using clk = std::chrono::high_resolution_clock;
     tts_timing timing = {};
@@ -2676,6 +3018,10 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     int32_t n_past = prefill_len;
     std::vector<int32_t> frame_codes(cfg.n_codebooks);
     std::unordered_set<int32_t> generated_cb0_tokens;
+    // Repetition-loop detection state (babble tails cycle identical frames)
+    std::vector<std::vector<int32_t>> rep_frames;
+    int32_t rep_run_len = 0;
+    int32_t rep_run_start = 0;
     const int32_t suppress_start = cfg.codec_vocab_size - 1024;
     
     std::vector<float> probs(cfg.codec_vocab_size);
@@ -2767,6 +3113,45 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
         
         for (int cb = 0; cb < cfg.n_codebooks; ++cb) {
             output.push_back(frame_codes[cb]);
+        }
+
+        // Repetition-loop detection: babble tails ("lack lack lack") cycle
+        // near-identical 16-codebook frames with sampling jitter. A frame is
+        // "repetitive" when >= 10/16 codes match a frame 1-6 back (periods up
+        // to 6). Natural speech never sustains that for 5 consecutive frames.
+        // OPT-IN (rep_loop_detect): consecutive near-silence frames can also
+        // match >= 10/16 codes, so a long pause in a deterministic (greedy)
+        // plain-mode generation could truncate mid-utterance. It stays on for
+        // ICL, where it is part of the layered babble-tail mitigation.
+        if (rep_loop_detect) rep_frames.emplace_back(frame_codes.begin(), frame_codes.end());
+        {
+            const size_t n_f = rep_frames.size();
+            bool is_rep = false;
+            for (int back = 1; back <= 6 && !is_rep && (size_t)back < n_f; ++back) {
+                int matches = 0;
+                const auto & a = rep_frames[n_f - 1];
+                const auto & b = rep_frames[n_f - 1 - back];
+                for (int cb = 0; cb < cfg.n_codebooks; ++cb) {
+                    if (a[cb] == b[cb]) ++matches;
+                }
+                if (matches >= 10) {
+                    is_rep = true;
+                }
+            }
+            if (is_rep) {
+                if (rep_run_len == 0) {
+                    rep_run_start = (int32_t)(n_f - 1);
+                }
+                ++rep_run_len;
+            } else {
+                rep_run_len = 0;
+            }
+            if (rep_run_len >= 5) {
+                fprintf(stderr, "  Repetition loop detected at frame %d, truncating %d frames\n",
+                        (int)(n_f - 1), (int)rep_run_len);
+                output.resize((size_t)rep_run_start * cfg.n_codebooks);
+                break;
+            }
         }
 
 #ifdef QWEN3_TTS_TIMING
@@ -2868,7 +3253,295 @@ bool TTSTransformer::generate(const int32_t * text_tokens, int32_t n_tokens,
     }
 #endif
 
-    return true;
+    
+#ifdef QWEN3_TTS_DUMP_CODES
+    if (const char * dump_path = getenv("QWEN3_TTS_DUMP_CODES")) {
+        FILE * df = fopen(dump_path, "wb");
+        if (df) {
+            int32_t n_out = (int32_t)output.size();
+            fwrite(&n_out, sizeof(int32_t), 1, df);
+            fwrite(output.data(), sizeof(int32_t), n_out, df);
+            fclose(df);
+        }
+    }
+#endif
+
+        return true;
+}
+
+bool TTSTransformer::generate_icl(const int32_t * text_tokens, int32_t n_tokens,
+                                   const int32_t * ref_text_tokens, int32_t n_ref_text,
+                                   const int32_t * ref_codec_tokens, int32_t n_ref_frames,
+                                   const float * speaker_embd, int32_t max_len,
+                                   std::vector<int32_t> & output,
+                                   int32_t language_id,
+                                   float repetition_penalty,
+                                   float temperature,
+                                   int32_t top_k,
+                                   float eos_bias,
+                                   int32_t target_frames,
+                                   bool rep_loop_detect) {
+    if (!model_.ctx) {
+        error_msg_ = "Model not loaded";
+        return false;
+    }
+    if (!text_tokens || n_tokens < 4) {
+        error_msg_ = "ICL: need at least 4 target text tokens";
+        return false;
+    }
+    if (!ref_codec_tokens || n_ref_frames < 1) {
+        error_msg_ = "ICL: need at least 1 reference codec frame";
+        return false;
+    }
+    if (max_len <= 0) {
+        output.clear();
+        return true;
+    }
+
+    const auto & cfg = model_.config;
+
+    std::vector<float> prefill_embd;
+    std::vector<float> trailing_text_hidden;
+    std::vector<float> tts_pad_embed;
+
+    if (!build_prefill_graph_icl(text_tokens, n_tokens,
+                                  ref_text_tokens, n_ref_text,
+                                  ref_codec_tokens, n_ref_frames,
+                                  speaker_embd, language_id,
+                                  prefill_embd, trailing_text_hidden, tts_pad_embed)) {
+        return false;
+    }
+
+    const int32_t prefill_len = (int32_t)(prefill_embd.size() / cfg.hidden_size);
+    const int32_t trailing_len = (int32_t)(trailing_text_hidden.size() / cfg.hidden_size);
+
+    const int32_t required_ctx = prefill_len + max_len + 8;
+    if (state_.cache.n_ctx < required_ctx || state_.cache.n_ctx > std::max<int32_t>(required_ctx * 2, 512)) {
+        if (!init_kv_cache(required_ctx)) {
+            return false;
+        }
+    }
+    clear_kv_cache();
+
+    // Forward the prefill (identical to x-vector mode from here on)
+    std::vector<float> hidden_out;
+    std::vector<float> logits;
+    if (!forward_prefill(prefill_embd.data(), prefill_len, 0, hidden_out, &logits)) {
+        return false;
+    }
+
+    // ── Autoregressive loop: EXACT copy of x-vector generate() ──
+    output.clear();
+    output.reserve(max_len * cfg.n_codebooks);
+
+    int32_t n_past = prefill_len;
+    std::vector<int32_t> frame_codes(cfg.n_codebooks);
+    std::unordered_set<int32_t> generated_cb0_tokens;
+    // Repetition-loop detection state (babble tails cycle identical frames)
+    std::vector<std::vector<int32_t>> rep_frames;
+    int32_t rep_run_len = 0;
+    int32_t rep_run_start = 0;
+    const int32_t suppress_start = cfg.codec_vocab_size - 1024;
+
+    std::vector<float> probs(cfg.codec_vocab_size);
+    std::vector<float> step_embd(cfg.hidden_size, 0.0f);
+    std::vector<float> embd_row(cfg.hidden_size);
+
+    for (int frame = 0; frame < max_len; ++frame) {
+        // Suppress special tokens
+        for (int32_t i = suppress_start; i < cfg.codec_vocab_size; ++i) {
+            if (i != cfg.codec_eos_id) {
+                logits[i] = -INFINITY;
+            }
+        }
+
+        // Repetition penalty (full history, same as x-vector)
+        if (repetition_penalty != 1.0f) {
+            for (int32_t tok : generated_cb0_tokens) {
+                if (tok >= 0 && tok < cfg.codec_vocab_size) {
+                    if (logits[tok] > 0.0f) {
+                        logits[tok] /= repetition_penalty;
+                    } else {
+                        logits[tok] *= repetition_penalty;
+                    }
+                }
+            }
+        }
+
+        // EOS logit bias: the 1.7B model under-samples EOS in ICL mode and
+        // babbles past the speech end (issue #21); a small nudge makes runs
+        // terminate. Past target_frames the bias ramps up (+0.1/frame, capped
+        // +6.0) so babble trajectories are forced to end ~1-2s past the
+        // target while natural generation is untouched. Applied to raw
+        // logits in greedy mode and post-temperature-scaled logits in
+        // sampling mode (identical to no-bias behaviour when eos_bias=0).
+        float eff_eos_bias = eos_bias;
+        if (target_frames > 0 && frame > target_frames) {
+            eff_eos_bias += 0.1f * (float)(frame - target_frames);
+            if (eff_eos_bias > 6.0f) eff_eos_bias = 6.0f;
+        }
+
+        // Sample cb0 (identical to x-vector)
+        int32_t next_token;
+        if (temperature <= 0.0f) {
+            if (eff_eos_bias != 0.0f) {
+                logits[cfg.codec_eos_id] += eff_eos_bias;
+            }
+            next_token = argmax(logits.data(), cfg.codec_vocab_size);
+        } else {
+            for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
+                logits[i] /= temperature;
+            }
+            if (eff_eos_bias != 0.0f) {
+                logits[cfg.codec_eos_id] += eff_eos_bias;
+            }
+            if (top_k > 0 && top_k < cfg.codec_vocab_size) {
+                std::vector<std::pair<float, int32_t>> scored(cfg.codec_vocab_size);
+                for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
+                    scored[i] = {logits[i], i};
+                }
+                std::partial_sort(scored.begin(), scored.begin() + top_k, scored.end(),
+                    [](const std::pair<float, int32_t> & a, const std::pair<float, int32_t> & b) {
+                        return a.first > b.first;
+                    });
+                float threshold = scored[top_k - 1].first;
+                for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
+                    if (logits[i] < threshold) {
+                        logits[i] = -INFINITY;
+                    }
+                }
+            }
+            float max_logit = *std::max_element(logits.data(), logits.data() + cfg.codec_vocab_size);
+            double sum = 0.0;
+            for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
+                probs[i] = expf(logits[i] - max_logit);
+                sum += probs[i];
+            }
+            for (int32_t i = 0; i < cfg.codec_vocab_size; ++i) {
+                probs[i] = (float)(probs[i] / sum);
+            }
+            std::discrete_distribution<int32_t> dist(probs.begin(), probs.end());
+            next_token = dist(rng_);
+        }
+
+        if (next_token == cfg.codec_eos_id) {
+            break;
+        }
+
+        frame_codes[0] = next_token;
+        generated_cb0_tokens.insert(next_token);
+
+        // Code predictor: use last_hidden_ (set by forward_prefill/forward_step)
+        std::vector<int32_t> codes_1_15;
+        if (!predict_codes_autoregressive(last_hidden_.data(), frame_codes[0], codes_1_15,
+                                            temperature, top_k)) {
+            return false;
+        }
+
+        for (int cb = 1; cb < cfg.n_codebooks; ++cb) {
+            frame_codes[cb] = codes_1_15[cb - 1];
+        }
+
+        for (int cb = 0; cb < cfg.n_codebooks; ++cb) {
+            output.push_back(frame_codes[cb]);
+        }
+
+        // Repetition-loop detection: babble tails ("lack lack lack") cycle
+        // near-identical 16-codebook frames with sampling jitter. A frame is
+        // "repetitive" when >= 10/16 codes match a frame 1-6 back (periods up
+        // to 6). Natural speech never sustains that for 5 consecutive frames.
+        // OPT-IN (rep_loop_detect): consecutive near-silence frames can also
+        // match >= 10/16 codes, so a long pause in a deterministic (greedy)
+        // plain-mode generation could truncate mid-utterance. It stays on for
+        // ICL, where it is part of the layered babble-tail mitigation.
+        if (rep_loop_detect) rep_frames.emplace_back(frame_codes.begin(), frame_codes.end());
+        {
+            const size_t n_f = rep_frames.size();
+            bool is_rep = false;
+            for (int back = 1; back <= 6 && !is_rep && (size_t)back < n_f; ++back) {
+                int matches = 0;
+                const auto & a = rep_frames[n_f - 1];
+                const auto & b = rep_frames[n_f - 1 - back];
+                for (int cb = 0; cb < cfg.n_codebooks; ++cb) {
+                    if (a[cb] == b[cb]) ++matches;
+                }
+                if (matches >= 10) {
+                    is_rep = true;
+                }
+            }
+            if (is_rep) {
+                if (rep_run_len == 0) {
+                    rep_run_start = (int32_t)(n_f - 1);
+                }
+                ++rep_run_len;
+            } else {
+                rep_run_len = 0;
+            }
+            if (rep_run_len >= 5) {
+                fprintf(stderr, "  Repetition loop detected at frame %d, truncating %d frames\n",
+                        (int)(n_f - 1), (int)rep_run_len);
+                output.resize((size_t)rep_run_start * cfg.n_codebooks);
+                break;
+            }
+        }
+
+        if (frame + 1 >= max_len) {
+            break;
+        }
+
+        // Step embedding: codec embedding lookups (NOT hidden states)
+        std::fill(step_embd.begin(), step_embd.end(), 0.0f);
+
+        // cb0 from talker codec_embd
+        if (!lookup_single_embedding_row(model_.codec_embd, frame_codes[0], embd_row.data())) {
+            return false;
+        }
+        for (int32_t h = 0; h < cfg.hidden_size; ++h) {
+            step_embd[h] = embd_row[h];
+        }
+
+        // cb1-15 from code_pred_embd
+        for (int cb = 1; cb < cfg.n_codebooks; ++cb) {
+            int32_t code_token = frame_codes[cb];
+            if (!lookup_single_embedding_row(model_.code_pred_embd[cb - 1], code_token, embd_row.data())) {
+                return false;
+            }
+            for (int32_t h = 0; h < cfg.hidden_size; ++h) {
+                step_embd[h] += embd_row[h];
+            }
+        }
+
+        // Trailing text: excess text rows while available, then tts_pad
+        // (non-empty in ICL mode when the text stream outlasts the codec)
+        const float * trailing_row = (frame < trailing_len)
+            ? trailing_text_hidden.data() + (size_t)frame * cfg.hidden_size
+            : tts_pad_embed.data();
+        for (int32_t h = 0; h < cfg.hidden_size; ++h) {
+            step_embd[h] += trailing_row[h];
+        }
+
+        // Forward step: logits go into `logits`, NOT hidden
+        if (!forward_step(step_embd.data(), n_past, logits)) {
+            return false;
+        }
+
+        n_past++;
+    }
+
+    
+#ifdef QWEN3_TTS_DUMP_CODES
+    if (const char * dump_path = getenv("QWEN3_TTS_DUMP_CODES")) {
+        FILE * df = fopen(dump_path, "wb");
+        if (df) {
+            int32_t n_out = (int32_t)output.size();
+            fwrite(&n_out, sizeof(int32_t), 1, df);
+            fwrite(output.data(), sizeof(int32_t), n_out, df);
+            fclose(df);
+        }
+    }
+#endif
+
+        return true;
 }
 
 bool TTSTransformer::forward(const int32_t * tokens, int32_t n_tokens, int32_t n_past,
