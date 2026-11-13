@@ -12,6 +12,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <algorithm>
 
@@ -27,6 +28,75 @@ static void print_shape(const char * label, struct ggml_tensor * t) {
     fprintf(stderr, "  %s: [%lld, %lld, %lld, %lld] type=%d\n",
             label, (long long)t->ne[0], (long long)t->ne[1],
             (long long)t->ne[2], (long long)t->ne[3], (int)t->type);
+}
+
+
+// ─── Host-side F32 convolution (bypasses ggml_conv_1d F16 limitation) ──────
+// PR #29 insight: ggml_mul_mat handles F32 weights natively on CPU.
+// The F16 limitation is ONLY in ggml_im2col (the conv_1d kernel).
+// By doing patch extraction on the host and feeding the result as a
+// mul_mat input, we get full F32 precision through the SEANet stages.
+
+/// Plain 1D convolution on the host, F32 throughout.
+/// weight: [K, IC, OC] (kernel, in_channels, out_channels)
+/// input: [T, IC] (temporal, channels)
+/// output: [OW, OC] where OW = (T - effective_k) / stride + 1
+static void host_conv1d(
+    const float * weight,   // [K * IC * OC]
+    const float * bias,     // [OC] or nullptr
+    const float * input,    // [T * IC] (T rows of IC channels)
+    int32_t T, int32_t IC, int32_t OC,
+    int32_t K, int32_t stride, int32_t dilation,
+    float * output,          // [OW * OC]
+    int32_t * out_len)
+{
+    int32_t effective_k = (K - 1) * dilation + 1;
+    int32_t OW = (T - effective_k) / stride + 1;
+    *out_len = OW;
+
+    for (int32_t ow = 0; ow < OW; ow++) {
+        for (int32_t oc = 0; oc < OC; oc++) {
+            float sum = bias ? bias[oc] : 0.0f;
+            for (int32_t ic = 0; ic < IC; ic++) {
+                for (int32_t k = 0; k < K; k++) {
+                    int32_t input_pos = ow * stride + k * dilation;
+                    if (input_pos >= 0 && input_pos < T) {
+                        // GGML weight layout: ne=[K, IC, OC] → memory [OC, IC, K]
+                        // float_index(k, ic, oc) = oc * IC * K + ic * K + k
+                        // input layout: [T, IC] → inp[input_pos*IC + ic]
+                        sum += weight[oc * IC * K + ic * K + k] * input[input_pos * IC + ic];
+                    }
+                }
+            }
+            output[ow * OC + oc] = sum;
+        }
+    }
+}
+
+/// Read a GGML tensor into a host F32 vector (handles F16→F32 conversion).
+static std::vector<float> tensor_to_host_f32(struct ggml_tensor * t) {
+    size_t nbytes = ggml_nbytes(t);
+    std::vector<float> out;
+    if (t->type == GGML_TYPE_F32) {
+        out.resize(nbytes / sizeof(float));
+        ggml_backend_tensor_get(t, out.data(), 0, nbytes);
+    } else if (t->type == GGML_TYPE_F16) {
+        size_t n = nbytes / sizeof(uint16_t);
+        std::vector<uint16_t> f16(n);
+        ggml_backend_tensor_get(t, f16.data(), 0, nbytes);
+        out.resize(n);
+        for (size_t i = 0; i < n; i++) {
+            out[i] = ggml_fp16_to_fp32(f16[i]);
+        }
+    }
+    return out;
+}
+
+/// Apply ELU activation element-wise.
+static void host_elu(float * data, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        data[i] = data[i] > 0.0f ? data[i] : expf(data[i]) - 1.0f;
+    }
 }
 
 // Forward declaration (definition at bottom of file)
@@ -322,6 +392,11 @@ static struct ggml_tensor * permute_qkv_weight_kyutai_to_block(
 }
 
 bool CodecEncoder::load(const std::string & model_path) {
+    // Runtime path toggle: QWEN3_TTS_ENCODER_F32=0 selects the GGML F16
+    // graph path (default 1 = host-side F32 on this branch)
+    if (const char * env = getenv("QWEN3_TTS_ENCODER_F32")) {
+        use_f32_ = (strcmp(env, "0") != 0);
+    }
     unload();
 
     GGUFLoader loader;
@@ -476,6 +551,631 @@ void CodecEncoder::unload() {
 // ─── Encode: full forward pass ────────────────────────────────────────
 
 bool CodecEncoder::encode(
+    const float * audio,
+    int32_t n_samples,
+    std::vector<int32_t> & codec_tokens,
+    int32_t & n_frames)
+{
+    // Dispatch: host-side F32 SEANet (default on this branch) or the GGML
+    // F16 graph path (the #30 encoder). Toggle with set_use_f32() or
+    // QWEN3_TTS_ENCODER_F32=0/1 (default 1).
+    return use_f32_ ? encode_host_f32(audio, n_samples, codec_tokens, n_frames)
+                    : encode_ggml(audio, n_samples, codec_tokens, n_frames);
+}
+
+bool CodecEncoder::encode_host_f32(
+    const float * audio,
+    int32_t n_samples,
+    std::vector<int32_t> & codec_tokens,
+    int32_t & n_frames)
+{
+    if (!model_.loaded) {
+        error_msg_ = "encoder not loaded";
+        return false;
+    }
+    if (!audio || n_samples <= 0) {
+        error_msg_ = "invalid audio input";
+        return false;
+    }
+
+    const auto & cfg = model_.config;
+    const int32_t hidden = cfg.HIDDEN_SIZE;
+
+    // ── Stage 1: SEANet convolutions (HOST-SIDE, F32) ──
+    // This bypasses ggml_conv_1d's F16 limitation entirely.
+    // Input: [T=n_samples, C=1]
+    std::vector<float> buf(audio, audio + n_samples);
+
+    // Activation dumps for parity debugging (QWEN3_TTS_ENC_ACT_DIR=<dir>)
+    const char * act_dir = getenv("QWEN3_TTS_ENC_ACT_DIR");
+    auto dump_act = [&](const char * name) {
+        if (!act_dir) return;
+        std::string p = std::string(act_dir) + "/" + name;
+        FILE * f = fopen(p.c_str(), "wb");
+        if (f) { fwrite(buf.data(), 4, buf.size(), f); fclose(f); }
+    };
+
+    // Helper to run one conv stage: pad → conv → bias → ELU
+    auto run_conv = [&](struct ggml_tensor * w, struct ggml_tensor * b,
+                        int32_t stride) -> bool {
+        if (!w) { error_msg_ = "missing conv weight"; return false; }
+        int32_t K = (int32_t)w->ne[0];   // kernel
+        int32_t IC = (int32_t)w->ne[1];  // in channels
+        int32_t OC = (int32_t)w->ne[2];  // out channels
+        int32_t T = (int32_t)buf.size() / IC;
+
+        // Causal-SAME padding. Output length is ceil(T / stride) — the
+        // floor formula loses a position when T % stride != 0 (e.g. conv.12
+        // with T=1180, stride 8: 148, not 147).
+        int32_t pad_left = (K - 1) + 1 - stride;
+        if (pad_left < 0) pad_left = 0;
+        int32_t OW = (T + stride - 1) / stride;  // ceil(T / stride)
+        if (OW < 1) OW = 1;
+        int32_t needed = (OW - 1) * stride + K;
+        int32_t pad_right = needed - T - pad_left;
+        if (pad_right < 0) pad_right = 0;
+
+        // Pad input
+        if (pad_left > 0 || pad_right > 0) {
+            std::vector<float> padded((size_t)(T + pad_left + pad_right) * IC, 0.0f);
+            memcpy(padded.data() + (size_t)pad_left * IC, buf.data(), (size_t)T * IC * sizeof(float));
+            buf = std::move(padded);
+            T = T + pad_left + pad_right;
+        }
+
+        // Read weight and bias to host F32
+        std::vector<float> w_f32 = tensor_to_host_f32(w);
+        std::vector<float> b_f32 = b ? tensor_to_host_f32(b) : std::vector<float>();
+
+        // Convolution
+        std::vector<float> out((size_t)OW * OC);
+        int32_t out_len;
+        host_conv1d(w_f32.data(), b_f32.empty() ? nullptr : b_f32.data(),
+                     buf.data(), T, IC, OC, K, stride, 1,
+                     out.data(), &out_len);
+        // NOTE: no activation here — Python's MimiConv1d is padding+conv
+        // only. ELUs live at explicit positions (after resblocks, after
+        // conv.12), applied by the callers.
+        buf = std::move(out);
+        ENC_LOG("  conv: K=%d IC=%d OC=%d stride=%d → [%d, %d]\n", K, IC, OC, stride, out_len, OC);
+        return true;
+    };
+
+    // Helper for pre-activation residual block: ELU → conv1 → ELU → conv2 → +residual
+    auto run_res_block = [&](struct ggml_tensor * w1, struct ggml_tensor * b1,
+                              struct ggml_tensor * w2, struct ggml_tensor * b2) -> bool {
+        if (!w1 || !w2) { error_msg_ = "missing res block weight"; return false; }
+        int32_t IC = (int32_t)w1->ne[1];
+        int32_t T = (int32_t)buf.size() / IC;
+
+        // Save residual
+        std::vector<float> residual = buf;
+
+        // Pre-activation: ELU first
+        host_elu(buf.data(), buf.size());
+
+        // conv1 (dilated, kernel 3)
+        {
+            int32_t K1 = (int32_t)w1->ne[0];
+            int32_t OC1 = (int32_t)w1->ne[2];
+            int32_t dilation = 1;
+            int32_t effective_k = (K1 - 1) * dilation + 1;
+            int32_t pad_left = effective_k - 1; // causal for dilated conv
+            std::vector<float> padded((size_t)(T + pad_left) * IC, 0.0f);
+            memcpy(padded.data() + (size_t)pad_left * IC, buf.data(), (size_t)T * IC * sizeof(float));
+            std::vector<float> w1_f32 = tensor_to_host_f32(w1);
+            std::vector<float> b1_f32 = b1 ? tensor_to_host_f32(b1) : std::vector<float>();
+            std::vector<float> out((size_t)T * OC1);
+            int32_t out_len;
+            host_conv1d(w1_f32.data(), b1_f32.empty() ? nullptr : b1_f32.data(),
+                         padded.data(), T + pad_left, IC, OC1, K1, 1, dilation,
+                         out.data(), &out_len);
+            host_elu(out.data(), out.size());
+            buf = std::move(out);
+        }
+
+        // conv2 (kernel 1, no padding needed)
+        {
+            int32_t IC2 = (int32_t)w2->ne[1];
+            int32_t OC2 = (int32_t)w2->ne[2];
+            std::vector<float> w2_f32 = tensor_to_host_f32(w2);
+            std::vector<float> b2_f32 = b2 ? tensor_to_host_f32(b2) : std::vector<float>();
+            std::vector<float> out((size_t)T * OC2);
+            int32_t out_len;
+            host_conv1d(w2_f32.data(), b2_f32.empty() ? nullptr : b2_f32.data(),
+                         buf.data(), T, IC2, OC2, 1, 1, 1,
+                         out.data(), &out_len);
+            // NO ELU after conv2 (pre-activation: ELU already applied before conv1)
+            buf = std::move(out);
+        }
+
+        // Residual connection
+        if (buf.size() == residual.size()) {
+            for (size_t i = 0; i < buf.size(); i++) buf[i] += residual[i];
+        }
+        return true;
+    };
+
+    ENC_LOG("SEANet stages (host-side F32):\n");
+
+    // Stage 0: conv.0 (stride 1, k7, 1→64) + res + ELU
+    if (!run_conv(model_.conv_entry_w[0], model_.conv_entry_b[0], 1)) return false;
+    dump_act("cpp_layer_00.f32");
+    if (!run_res_block(model_.res_w[0][0], model_.res_b[0][0],
+                       model_.res_w[0][1], model_.res_b[0][1])) return false;
+    dump_act("cpp_layer_01.f32");
+    host_elu(buf.data(), buf.size()); // post-resblock ELU
+
+    // Stage 1: conv.3 (stride 4, k8, 64→128) + res + ELU
+    if (!run_conv(model_.conv_entry_w[1], model_.conv_entry_b[1], 4)) return false;
+    dump_act("cpp_layer_03.f32");
+    if (!run_res_block(model_.res_w[1][0], model_.res_b[1][0],
+                       model_.res_w[1][1], model_.res_b[1][1])) return false;
+    dump_act("cpp_layer_04.f32");
+    host_elu(buf.data(), buf.size());
+
+    // Stage 2: conv.6 (stride 5, k10, 128→256) + res + ELU
+    if (!run_conv(model_.conv_entry_w[2], model_.conv_entry_b[2], 5)) return false;
+    dump_act("cpp_layer_06.f32");
+    if (!run_res_block(model_.res_w[2][0], model_.res_b[2][0],
+                       model_.res_w[2][1], model_.res_b[2][1])) return false;
+    dump_act("cpp_layer_07.f32");
+    host_elu(buf.data(), buf.size());
+
+    // Stage 3: conv.9 (stride 6, k12, 256→512) + res + ELU
+    if (!run_conv(model_.conv_entry_w[3], model_.conv_entry_b[3], 6)) return false;
+    dump_act("cpp_layer_09.f32");
+    if (!run_res_block(model_.res_w[3][0], model_.res_b[3][0],
+                       model_.res_w[3][1], model_.res_b[3][1])) return false;
+    dump_act("cpp_layer_10.f32");
+    host_elu(buf.data(), buf.size());
+
+    // Bottleneck expand: conv.12 (stride 8, k16, 512→1024), then ELU
+    // (Python layer_13 is a bare ELU between conv.12 and conv.14)
+    if (!run_conv(model_.bottleneck_expand_w, model_.bottleneck_expand_b, 8)) return false;
+    host_elu(buf.data(), buf.size());
+    dump_act("cpp_layer_13.f32");  // conv.12 + ELU (Python layer_13 = the ELU)
+
+    // Bottleneck contract: conv.14 (stride 1, k3, 1024→512) NO ELU
+    // The contract output goes directly to the transformer — no activation.
+    {
+        struct ggml_tensor * cw = model_.bottleneck_contract_w;
+        struct ggml_tensor * cb = model_.bottleneck_contract_b;
+        int32_t cK = (int32_t)cw->ne[0];
+        int32_t cIC = (int32_t)cw->ne[1];
+        int32_t cOC = (int32_t)cw->ne[2];
+        int32_t cT = (int32_t)buf.size() / cIC;
+        int32_t cpad = cK - 1;
+        std::vector<float> cpadded((size_t)(cT + cpad) * cIC, 0.0f);
+        memcpy(cpadded.data() + (size_t)cpad * cIC, buf.data(), (size_t)cT * cIC * sizeof(float));
+        std::vector<float> cw_f32 = tensor_to_host_f32(cw);
+        std::vector<float> cb_f32 = cb ? tensor_to_host_f32(cb) : std::vector<float>();
+        std::vector<float> cout((size_t)cT * cOC);
+        int32_t clen;
+        host_conv1d(cw_f32.data(), cb_f32.empty() ? nullptr : cb_f32.data(),
+                     cpadded.data(), cT + cpad, cIC, cOC, cK, 1, 1,
+                     cout.data(), &clen);
+        buf = std::move(cout);
+        dump_act("cpp_layer_14.f32");
+        ENC_LOG("  contract (no ELU): [%d, %d]\n", clen, cOC);
+    }
+
+    int32_t seanet_T = (int32_t)buf.size() / hidden;
+    ENC_LOG("SEANet output: [%d, %d]\n", seanet_T, hidden);
+
+    // ── Stage 2: Transformer (GGML graph — mul_mat only, no F16 limitation) ──
+    // The transformer uses only ggml_mul_mat, ggml_norm, ggml_rope, etc.
+    // No convolutions → F32 works natively per PR #29's insight.
+    {
+        int32_t n_pos = seanet_T;
+        ENC_LOG("Transformer: %d positions × %d hidden\n", n_pos, hidden);
+
+        // Build graph
+        size_t ctx_size = 256 * 1024 * 1024; // 256 MB for transformer graph
+        struct ggml_init_params gparams = {
+            /*.mem_size =*/ ctx_size,
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc =*/ true,
+        };
+        struct ggml_context * ctx0 = ggml_init(gparams);
+        if (!ctx0) { error_msg_ = "failed to init transformer ctx"; return false; }
+
+        // Input: [hidden, n_pos] (channel-major for mul_mat)
+        struct ggml_tensor * inp = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hidden, n_pos);
+        ggml_set_name(inp, "seanet_out");
+        ggml_set_input(inp);
+
+        // Positions for RoPE
+        struct ggml_tensor * pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_pos);
+        ggml_set_name(pos, "tfm_pos");
+        ggml_set_input(pos);
+
+        struct ggml_tensor * x = inp;
+        std::vector<struct ggml_tensor *> tfm_layer_outs;
+        std::vector<struct ggml_tensor *> tfm_attn_outs;
+        std::vector<struct ggml_tensor *> dbg_tensors;
+        std::vector<std::string> dbg_names;
+        std::vector<struct ggml_tensor *> dbg_weight_tensors;
+        std::vector<std::string> dbg_weight_names;
+
+        // 8 transformer layers
+        for (int layer = 0; layer < 8; layer++) {
+            // LayerNorm
+            struct ggml_tensor * normed_raw = ggml_norm(ctx0, x, 1e-5f);
+            struct ggml_tensor * normed = ggml_mul(ctx0, normed_raw, model_.tfm_attn_ln_w[layer]);
+            if (model_.tfm_attn_ln_b[layer]) {
+                normed = ggml_add(ctx0, normed, model_.tfm_attn_ln_b[layer]);
+            }
+            if (act_dir && layer == 0) {
+                ggml_set_output(normed_raw);
+                dbg_tensors.push_back(normed_raw);
+                dbg_names.push_back("cpp_norm_raw.f32");
+            }
+
+            if (act_dir && layer == 0) {
+                ggml_set_output(normed);
+                dbg_tensors.push_back(normed);
+                dbg_names.push_back("cpp_normed.f32");
+                // also capture the RUNTIME weight bytes for verification
+                dbg_weight_tensors.push_back(model_.tfm_q[layer]);
+                dbg_weight_names.push_back("cpp_runtime_qw.f32");
+            }
+
+            // Q/K/V projections
+            struct ggml_tensor * Q = ggml_mul_mat(ctx0, model_.tfm_q[layer], normed);
+            struct ggml_tensor * K = ggml_mul_mat(ctx0, model_.tfm_k[layer], normed);
+            struct ggml_tensor * V = ggml_mul_mat(ctx0, model_.tfm_v[layer], normed);
+
+            int32_t n_heads = cfg.NUM_HEADS;
+            int32_t head_dim = cfg.head_dim();
+
+            Q = ggml_reshape_3d(ctx0, Q, head_dim, n_heads, n_pos);
+            K = ggml_reshape_3d(ctx0, K, head_dim, n_heads, n_pos);
+            V = ggml_reshape_3d(ctx0, V, head_dim, n_heads, n_pos);
+
+            // RoPE
+            struct ggml_tensor * Q_pre_rope = Q;
+            struct ggml_tensor * K_pre_rope = K;
+            Q = ggml_rope_ext(ctx0, Q, pos, nullptr, head_dim, GGML_ROPE_TYPE_NEOX, 0,
+                               cfg.ROPE_THETA, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            K = ggml_rope_ext(ctx0, K, pos, nullptr, head_dim, GGML_ROPE_TYPE_NEOX, 0,
+                               cfg.ROPE_THETA, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+            struct ggml_tensor * Q_rope = Q;
+            struct ggml_tensor * K_rope = K;
+            struct ggml_tensor * V_raw = V;
+            if (act_dir && layer == 0) {
+                ggml_set_output(Q_pre_rope); ggml_set_output(K_pre_rope);
+                ggml_set_output(Q_rope); ggml_set_output(K_rope);
+                ggml_set_output(V_raw);
+                for (auto * t2 : {Q_pre_rope, K_pre_rope, Q_rope, K_rope, V_raw}) {
+                    dbg_tensors.push_back(t2);
+                }
+                for (const char * n2 : {"cpp_q_pre_rope.f32", "cpp_k_pre_rope.f32",
+                                        "cpp_q_rope.f32", "cpp_k_rope.f32", "cpp_v_raw.f32"}) {
+                    dbg_names.push_back(n2);
+                }
+            }
+
+            // Permute to [head_dim, n_pos, n_heads]
+            Q = ggml_permute(ctx0, Q, 0, 2, 1, 3);
+            K = ggml_permute(ctx0, K, 0, 2, 1, 3);
+            V = ggml_permute(ctx0, V, 0, 2, 1, 3);
+
+            // Attention: KQ = K^T · Q / √d, causal mask, softmax
+            struct ggml_tensor * KQ = ggml_mul_mat(ctx0, K, Q);
+            KQ = ggml_scale(ctx0, KQ, 1.0f / sqrtf((float)head_dim));
+            KQ = ggml_diag_mask_inf(ctx0, KQ, 0);
+            KQ = ggml_soft_max(ctx0, KQ);
+
+            // KQV = V · softmax(KQ)
+            V = ggml_cont(ctx0, ggml_transpose(ctx0, V));
+            struct ggml_tensor * KQV = ggml_mul_mat(ctx0, V, KQ);
+            KQV = ggml_permute(ctx0, KQV, 0, 2, 1, 3);
+            struct ggml_tensor * attn_out = ggml_cont_2d(ctx0, KQV, hidden, n_pos);
+
+            // Output projection + layer scale
+            attn_out = ggml_mul_mat(ctx0, model_.tfm_o[layer], attn_out);
+            if (model_.tfm_attn_scale[layer]) {
+                attn_out = ggml_mul(ctx0, attn_out, model_.tfm_attn_scale[layer]);
+            }
+
+            // Residual
+            x = ggml_add(ctx0, x, attn_out);
+            if (act_dir) {
+                ggml_set_output(x);
+                tfm_attn_outs.push_back(x);
+            }
+
+            // FFN: LayerNorm → fc1 → GELU → fc2 (+ layer scale)
+            struct ggml_tensor * normed2 = ggml_norm(ctx0, x, 1e-5f);
+            normed2 = ggml_mul(ctx0, normed2, model_.tfm_ffn_ln_w[layer]);
+            if (model_.tfm_ffn_ln_b[layer]) {
+                normed2 = ggml_add(ctx0, normed2, model_.tfm_ffn_ln_b[layer]);
+            }
+            struct ggml_tensor * ff = ggml_mul_mat(ctx0, model_.tfm_ffn_up[layer], normed2);
+            ff = ggml_gelu_erf(ctx0, ff);
+            ff = ggml_mul_mat(ctx0, model_.tfm_ffn_down[layer], ff);
+            if (model_.tfm_ffn_scale[layer]) {
+                ff = ggml_mul(ctx0, ff, model_.tfm_ffn_scale[layer]);
+            }
+            x = ggml_add(ctx0, x, ff);
+            if (act_dir) {
+                ggml_set_output(x);
+                tfm_layer_outs.push_back(x);
+            }
+        }
+
+        ggml_set_output(x);
+        struct ggml_cgraph * gf = ggml_new_graph(ctx0);
+        ggml_build_forward_expand(gf, x);
+
+        // Setup backend
+        std::string be_err;
+        ggml_backend_t backend = init_preferred_backend("CodecEncoder-TF", &be_err);
+        if (!backend) { error_msg_ = "backend init: " + be_err; ggml_free(ctx0); return false; }
+
+        ggml_backend_t backend_cpu = nullptr;
+        ggml_backend_dev_t dev = ggml_backend_get_device(backend);
+        if (dev && ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+            backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+        }
+        std::vector<ggml_backend_t> backends = {backend};
+        if (backend_cpu) backends.push_back(backend_cpu);
+
+        constexpr int MAX_NODES = 8192;
+        ggml_backend_sched_t sched = ggml_backend_sched_new(
+            backends.data(), nullptr, (int)backends.size(), MAX_NODES, false, true);
+        if (!sched || !ggml_backend_sched_alloc_graph(sched, gf)) {
+            error_msg_ = "transformer graph alloc failed";
+            if (sched) ggml_backend_sched_free(sched);
+            release_preferred_backend(backend);
+            ggml_free(ctx0);
+            return false;
+        }
+
+        // Set SEANet output as input. buf is [T, hidden] row-major, which IS
+        // the memory layout of a [hidden, T] ggml tensor (ne0=hidden is the
+        // fastest dimension) — copy directly, no transpose.
+        ggml_backend_tensor_set(inp, buf.data(), 0, (size_t)hidden * n_pos * sizeof(float));
+
+        // Set positions
+        {
+            std::vector<int32_t> pos_data(n_pos);
+            for (int32_t i = 0; i < n_pos; i++) pos_data[i] = i;
+            ggml_backend_tensor_set(pos, pos_data.data(), 0, (size_t)n_pos * sizeof(int32_t));
+        }
+
+        if (act_dir) {
+            ggml_set_output(inp);
+            dbg_tensors.push_back(inp);
+            dbg_names.push_back("cpp_tfm_input.f32");
+        }
+
+        // Compute
+        if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) {
+            error_msg_ = "transformer compute failed";
+            ggml_backend_sched_reset(sched);
+            ggml_backend_sched_free(sched);
+            release_preferred_backend(backend);
+            ggml_free(ctx0);
+            return false;
+        }
+
+        // Read output: [hidden, T] ggml tensor memory == [T, hidden] row-major
+        {
+            buf.resize((size_t)n_pos * hidden);
+            ggml_backend_tensor_get(x, buf.data(), 0, (size_t)hidden * n_pos * sizeof(float));
+        }
+
+        // Runtime weight byte dumps (verify loader correctness)
+        if (act_dir && !dbg_weight_tensors.empty()) {
+            for (size_t di = 0; di < dbg_weight_tensors.size(); ++di) {
+                struct ggml_tensor * dt = dbg_weight_tensors[di];
+                const size_t n_el = ggml_nelements(dt);
+                std::vector<float> dbuf(n_el);
+                ggml_backend_tensor_get(dt, dbuf.data(), 0, ggml_nbytes(dt));
+                std::string pth = std::string(act_dir) + "/" + dbg_weight_names[di];
+                FILE * df = fopen(pth.c_str(), "wb");
+                if (df) { fwrite(dbuf.data(), 4, n_el, df); fclose(df); }
+            }
+        }
+
+        // Debug tensor dumps (layer 0 attention internals)
+        if (act_dir && !dbg_tensors.empty()) {
+            for (size_t di = 0; di < dbg_tensors.size(); ++di) {
+                struct ggml_tensor * dt = dbg_tensors[di];
+                const size_t n_el = ggml_nelements(dt);
+                std::vector<float> dbuf(n_el);
+                ggml_backend_tensor_get(dt, dbuf.data(), 0, n_el * sizeof(float));
+                std::string pth = std::string(act_dir) + "/" + dbg_names[di];
+                FILE * df = fopen(pth.c_str(), "wb");
+                if (df) { fwrite(dbuf.data(), 4, n_el, df); fclose(df); }
+            }
+        }
+
+        // Per-layer parity dumps
+        if (act_dir) {
+            std::vector<float> tbuf((size_t)hidden * n_pos);
+            for (size_t li = 0; li < tfm_attn_outs.size(); ++li) {
+                ggml_backend_tensor_get(tfm_attn_outs[li], tbuf.data(), 0,
+                                        (size_t)hidden * n_pos * sizeof(float));
+                std::vector<float> rowmajor((size_t)n_pos * hidden);
+                for (int32_t h = 0; h < hidden; h++) {
+                    for (int32_t t = 0; t < n_pos; t++) {
+                        rowmajor[(size_t)t * hidden + h] = tbuf[(size_t)h * n_pos + t];
+                    }
+                }
+                char name[32];
+                snprintf(name, sizeof(name), "cpp_attn_%02zu.f32", li);
+                std::string pth = std::string(act_dir) + "/" + name;
+                FILE * af = fopen(pth.c_str(), "wb");
+                if (af) { fwrite(rowmajor.data(), 4, rowmajor.size(), af); fclose(af); }
+            }
+            for (size_t li = 0; li < tfm_layer_outs.size(); ++li) {
+                ggml_backend_tensor_get(tfm_layer_outs[li], tbuf.data(), 0,
+                                        (size_t)hidden * n_pos * sizeof(float));
+                // transpose [hidden, T] -> [T, hidden] and write via dump path
+                std::vector<float> rowmajor((size_t)n_pos * hidden);
+                for (int32_t h = 0; h < hidden; h++) {
+                    for (int32_t t = 0; t < n_pos; t++) {
+                        rowmajor[(size_t)t * hidden + h] = tbuf[(size_t)h * n_pos + t];
+                    }
+                }
+                char name[32];
+                snprintf(name, sizeof(name), "cpp_tfm_%02zu.f32", li);
+                std::string p = std::string(act_dir) + "/" + name;
+                FILE * f = fopen(p.c_str(), "wb");
+                if (f) { fwrite(rowmajor.data(), 4, rowmajor.size(), f); fclose(f); }
+            }
+        }
+
+        ggml_backend_sched_reset(sched);
+        ggml_backend_sched_free(sched);
+        release_preferred_backend(backend);
+        ggml_free(ctx0);
+        ENC_LOG("Transformer done: [%d, %d]\n", n_pos, hidden);
+        dump_act("cpp_transformer.f32");
+    }
+
+    // ── Stage 3: Downsample (stride 2, k4) — host-side ──
+    {
+        std::vector<float> w_f32 = tensor_to_host_f32(model_.downsample_w);
+        int32_t K = (int32_t)model_.downsample_w->ne[0]; // 4
+        int32_t IC = (int32_t)model_.downsample_w->ne[1]; // 512
+        int32_t OC = (int32_t)model_.downsample_w->ne[2]; // 512
+        int32_t T = (int32_t)buf.size() / IC;
+        int32_t stride = 2;
+
+        // Causal-SAME with REPLICATE padding (Python: pad_mode='replicate').
+        // Output count is ceil(T / stride); left/right padding replicates the
+        // first/last frame. (Zero padding gives a small systematic mismatch.)
+        int32_t pad_left = K - 1 + 1 - stride; // 2
+        int32_t OW_ds = (T + stride - 1) / stride;
+        int32_t pad_right = (OW_ds - 1) * stride + K - (T + pad_left);
+        if (pad_right < 0) pad_right = 0;
+        std::vector<float> padded((size_t)(T + pad_left + pad_right) * IC, 0.0f);
+        // left: replicate frame 0
+        for (int32_t p = 0; p < pad_left; ++p) {
+            memcpy(padded.data() + (size_t)p * IC, buf.data(), (size_t)IC * sizeof(float));
+        }
+        memcpy(padded.data() + (size_t)pad_left * IC, buf.data(), (size_t)T * IC * sizeof(float));
+        // right: replicate last frame
+        for (int32_t p = 0; p < pad_right; ++p) {
+            memcpy(padded.data() + (size_t)(pad_left + T + p) * IC,
+                   buf.data() + (size_t)(T - 1) * IC, (size_t)IC * sizeof(float));
+        }
+
+        std::vector<float> out((size_t)OW_ds * OC);
+        int32_t out_len;
+        host_conv1d(w_f32.data(), nullptr, padded.data(),
+                     T + pad_left + pad_right, IC, OC, K, stride, 1,
+                     out.data(), &out_len);
+        buf = std::move(out);
+        ENC_LOG("Downsample output: [%d, %d]\n", out_len, OC);
+        dump_act("cpp_downsample.f32");
+    }
+
+    n_frames = (int32_t)buf.size() / hidden;
+
+    // ── Stage 4: RVQ quantization (host-side, already F32) ──
+    codec_tokens.resize((size_t)n_frames * 16);
+
+    // Semantic path
+    {
+        std::vector<float> cb_data;
+        if (!read_encoder_codebook_normalized(model_.vq_sem_cb, model_.vq_sem_usage,
+                                              cb_data, error_msg_)) {
+            return false;
+        }
+        int32_t cb_dim = cfg.CODEBOOK_DIM; // 256
+
+        // Project to codebook dim: input [n_frames, 512] × proj [512, 256] → [n_frames, 256]
+        std::vector<float> proj_w = tensor_to_host_f32(model_.vq_sem_in);
+        std::vector<float> latents((size_t)n_frames * cb_dim, 0.0f);
+        for (int32_t f = 0; f < n_frames; f++) {
+            for (int32_t d = 0; d < cb_dim; d++) {
+                float sum = 0.0f;
+                for (int32_t h = 0; h < hidden; h++) {
+                    sum += buf[(size_t)f * hidden + h] * proj_w[(size_t)d * hidden + h];
+                }
+                latents[(size_t)f * cb_dim + d] = sum;
+            }
+        }
+
+        for (int32_t f = 0; f < n_frames; f++) {
+            const float * vec = latents.data() + (size_t)f * cb_dim;
+            codec_tokens[(size_t)f * 16 + 0] = rvq_l2_argmin(
+                cb_data.data(), cfg.CODEBOOK_SIZE, cb_dim, vec);
+        }
+    }
+
+    // Acoustic path (15 quantizers, residual-chained)
+    {
+        int32_t cb_dim = cfg.CODEBOOK_DIM;
+        std::vector<float> proj_w = tensor_to_host_f32(model_.vq_aco_in);
+        std::vector<float> residuals((size_t)n_frames * cb_dim, 0.0f);
+
+        // Project to codebook dim
+        for (int32_t f = 0; f < n_frames; f++) {
+            for (int32_t d = 0; d < cb_dim; d++) {
+                float sum = 0.0f;
+                for (int32_t h = 0; h < hidden; h++) {
+                    sum += buf[(size_t)f * hidden + h] * proj_w[(size_t)d * hidden + h];
+                }
+                residuals[(size_t)f * cb_dim + d] = sum;
+            }
+        }
+
+        for (int q = 0; q < 15; q++) {
+            if (!model_.vq_aco_cb[q]) continue;
+            std::vector<float> cb_data;
+            if (!read_encoder_codebook_normalized(model_.vq_aco_cb[q], model_.vq_aco_usage[q],
+                                                   cb_data, error_msg_)) {
+                return false;
+            }
+            for (int32_t f = 0; f < n_frames; f++) {
+                float * vec = residuals.data() + (size_t)f * cb_dim;
+                int32_t idx = rvq_l2_argmin(cb_data.data(), cfg.CODEBOOK_SIZE, cb_dim, vec);
+                codec_tokens[(size_t)f * 16 + 1 + q] = idx;
+                if (q < 14) {
+                    const float * entry = cb_data.data() + (size_t)idx * cb_dim;
+                    for (int32_t d = 0; d < cb_dim; d++) vec[d] -= entry[d];
+                }
+            }
+        }
+    }
+
+    ENC_LOG("F32 encoder: %d samples → %d frames × 16 codebooks\n", n_samples, n_frames);
+    return true;
+}
+
+// ─── RVQ L2 argmin ────────────────────────────────────────────────────
+
+static int32_t rvq_l2_argmin(
+    const float * codebook,
+    int32_t cb_size,
+    int32_t cb_dim,
+    const float * vector)
+{
+    float best_dist = 1e30f;
+    int32_t best_idx = 0;
+    for (int32_t i = 0; i < cb_size; i++) {
+        const float * entry = codebook + (size_t)i * cb_dim;
+        float dist = 0.0f;
+        for (int32_t d = 0; d < cb_dim; d++) {
+            const float diff = entry[d] - vector[d];
+            dist += diff * diff;
+        }
+        if (dist < best_dist) {
+            best_dist = dist;
+            best_idx = i;
+        }
+    }
+    return best_idx;
+}
+
+// ── GGML F16 graph path (ported from feat/in-context-cloning) ──
+bool CodecEncoder::encode_ggml(
     const float * audio,
     int32_t n_samples,
     std::vector<int32_t> & codec_tokens,
@@ -843,31 +1543,6 @@ bool CodecEncoder::encode(
 
     ENC_LOG("Encoded %d samples → %d frames × 16 codebooks\n", n_samples, n_frames);
     return true;
-}
-
-// ─── RVQ L2 argmin ────────────────────────────────────────────────────
-
-static int32_t rvq_l2_argmin(
-    const float * codebook,
-    int32_t cb_size,
-    int32_t cb_dim,
-    const float * vector)
-{
-    float best_dist = 1e30f;
-    int32_t best_idx = 0;
-    for (int32_t i = 0; i < cb_size; i++) {
-        const float * entry = codebook + (size_t)i * cb_dim;
-        float dist = 0.0f;
-        for (int32_t d = 0; d < cb_dim; d++) {
-            const float diff = entry[d] - vector[d];
-            dist += diff * diff;
-        }
-        if (dist < best_dist) {
-            best_dist = dist;
-            best_idx = i;
-        }
-    }
-    return best_idx;
 }
 
 } // namespace qwen3_tts

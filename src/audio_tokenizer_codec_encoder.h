@@ -139,17 +139,27 @@ public:
 
     /// Encode 24kHz mono f32 audio → codec tokens.
     /// codec_tokens: [n_frames × 16] (1 semantic + 15 acoustic per frame)
+    /// Uses the host-side F32 SEANet by default; toggle with set_use_f32()
+    /// or QWEN3_TTS_ENCODER_F32=0 for the GGML F16 graph path.
     bool encode(const float * audio, int32_t n_samples,
                 std::vector<int32_t> & codec_tokens,
                 int32_t & n_frames);
+
+    void set_use_f32(bool enabled) { use_f32_ = enabled; }
 
     const char * get_error() const { return error_msg_.c_str(); }
     const MimiEncoderConfig & config() const { return model_.config; }
     const std::map<std::string, struct ggml_tensor *> & model_tensors() const { return model_.tensors; }
 
 private:
+    bool encode_host_f32(const float * audio, int32_t n_samples,
+                         std::vector<int32_t> & codec_tokens, int32_t & n_frames);
+    bool encode_ggml(const float * audio, int32_t n_samples,
+                     std::vector<int32_t> & codec_tokens, int32_t & n_frames);
+
     MimiEncoderModel model_;
     std::string error_msg_;
+    bool use_f32_ = true;
 };
 
 } // namespace qwen3_tts

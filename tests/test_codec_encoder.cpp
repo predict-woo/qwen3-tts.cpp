@@ -15,6 +15,26 @@
 #include <string>
 #include <vector>
 
+// Python float32 reference tokens for tests/data/sine_440_1s.wav
+// (1s 440Hz sine @ 0.5 amp, PCM16; both sides read identical samples)
+static const int32_t SINE_REF_TOKENS[208] = {
+    1221, 544, 683, 382, 1445, 2023, 276, 1288, 885, 1486, 637, 1462, 1057, 1626, 1169, 66,
+    215, 544, 683, 577, 1360, 271, 41, 624, 1755, 452, 1729, 384, 2035, 792, 331, 1889,
+    210, 544, 1317, 1799, 151, 1625, 1583, 830, 1024, 1880, 882, 1324, 1355, 666, 721, 135,
+    294, 544, 683, 577, 940, 1154, 1485, 463, 1704, 293, 1405, 1873, 718, 1229, 1845, 1516,
+    1095, 544, 683, 577, 615, 1154, 1485, 931, 331, 1595, 950, 891, 586, 1930, 1037, 33,
+    695, 544, 683, 2008, 1124, 1781, 1572, 1773, 1305, 1286, 1567, 1704, 1855, 344, 320, 1224,
+    695, 544, 1317, 1799, 1774, 403, 1572, 860, 220, 1122, 637, 2025, 124, 1917, 1777, 606,
+    687, 544, 1317, 1799, 151, 1522, 556, 491, 1259, 172, 1714, 437, 1358, 556, 1938, 1326,
+    327, 544, 683, 2008, 789, 1781, 1607, 1509, 1305, 1973, 223, 1071, 508, 210, 82, 1709,
+    327, 544, 683, 2008, 624, 1262, 1764, 954, 611, 59, 1866, 128, 845, 1612, 1872, 1469,
+    327, 544, 683, 2008, 1124, 1781, 1572, 36, 1305, 765, 1431, 1438, 463, 71, 1478, 157,
+    327, 544, 1317, 1799, 1774, 403, 1572, 1777, 220, 1997, 207, 1075, 711, 589, 1354, 1503,
+    327, 544, 1317, 1799, 1466, 1478, 1475, 1508, 1336, 1607, 293, 903, 1232, 1877, 166, 230,
+};
+static const int32_t SINE_REF_N_FRAMES = 13;
+
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -226,6 +246,75 @@ static bool test_token_parity(const std::string & model_path) {
     return true;
 }
 
+// ─── F32 exact-parity test ────────────────────────────────────────────
+// The host-F32 encoder with an F32 tokenizer GGUF must reproduce the Python
+// float32 reference tokens EXACTLY (see PR #31: 100% parity). Skipped when
+// only the F16 GGUF is available (F16 weights match ~0.5% by quantization).
+
+static void test_f32_exact_parity(const std::string & default_model_path) {
+    std::string f32_path = "models/qwen3-tts-tokenizer-f32.gguf";
+    FILE * probe = fopen(f32_path.c_str(), "r");
+    if (!probe) {
+        fprintf(stderr, "\n[SKIP] F32 exact-parity test (%s not present)\n", f32_path.c_str());
+        return;
+    }
+    fclose(probe);
+
+    qwen3_tts::CodecEncoder enc;
+    if (!enc.load(f32_path)) {
+        fprintf(stderr, "\n[FAIL] F32 parity: load: %s\n", enc.get_error());
+        tests_failed++;
+        return;
+    }
+
+    // Read the committed WAV so both this test and the Python reference
+    // generator consume identical samples (independently computed floats
+    // differ by ~1e-7 and flip RVQ argmin near-ties).
+    FILE * wf = fopen("tests/data/sine_440_1s.wav", "rb");
+    if (!wf) {
+        fprintf(stderr, "\n[SKIP] F32 exact-parity test (tests/data/sine_440_1s.wav not found)\n");
+        return;
+    }
+    fseek(wf, 44, SEEK_SET);  // skip RIFF header (44 bytes, written by wave.open)
+    int16_t pcm[24000];
+    size_t got = fread(pcm, 2, 24000, wf);
+    fclose(wf);
+    if (got != 24000) {
+        fprintf(stderr, "\n[SKIP] F32 exact-parity test (short WAV: %zu samples)\n", got);
+        return;
+    }
+    std::vector<float> audio(24000);
+    for (int i = 0; i < 24000; i++) {
+        audio[i] = (float)pcm[i] / 32767.0f;
+    }
+    std::vector<int32_t> tokens;
+    int32_t frames = 0;
+    if (!enc.encode(audio.data(), (int32_t)audio.size(), tokens, frames)) {
+        fprintf(stderr, "\n[FAIL] F32 parity: encode: %s\n", enc.get_error());
+        tests_failed++;
+        return;
+    }
+    if (frames != SINE_REF_N_FRAMES || (int)tokens.size() != SINE_REF_N_FRAMES * 16) {
+        fprintf(stderr, "\n[FAIL] F32 parity: %d frames, expected %d\n", frames, (int)SINE_REF_N_FRAMES);
+        tests_failed++;
+        return;
+    }
+    int match = 0;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        if (tokens[i] == SINE_REF_TOKENS[i]) match++;
+    }
+    if (match == (int)tokens.size()) {
+        fprintf(stderr, "\n[PASS] F32 exact parity: %d/%d tokens match Python float32\n",
+                match, (int)tokens.size());
+        tests_passed++;
+    } else {
+        fprintf(stderr, "\n[FAIL] F32 exact parity: %d/%d tokens match (regression!)\n",
+                match, (int)tokens.size());
+        tests_failed++;
+    }
+    (void)default_model_path;
+}
+
 int main(int argc, char ** argv) {
     std::string model_path = "models/qwen3-tts-tokenizer-f16-v2.gguf";
     for (int i = 1; i < argc; i++) {
@@ -242,6 +331,7 @@ int main(int argc, char ** argv) {
     test_load_and_encode(model_path);
     test_codebook_parity(model_path);
     test_token_parity(model_path);
+    test_f32_exact_parity(model_path);
 
     fprintf(stderr, "\n=== Results: %d passed, %d failed ===\n",
             tests_passed, tests_failed);
