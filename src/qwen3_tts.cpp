@@ -139,6 +139,20 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
     std::string tokenizer_model_path = model_dir + "/qwen3-tts-tokenizer-f16.gguf";
     tts_model_path_ = tts_model_path;
     decoder_model_path_ = tokenizer_model_path;
+    // The codec encoder prefers an F32 tokenizer GGUF when the model dir
+    // has one (exact Python parity — the decoder itself must keep the F16
+    // GGUF: its conv_1d/im2col requires F16 weights).
+    codec_encoder_model_path_ = tokenizer_model_path;
+    {
+        std::string f32_tok_path = model_dir + "/qwen3-tts-tokenizer-f32.gguf";
+        FILE * f32_check = fopen(f32_tok_path.c_str(), "r");
+        if (f32_check) {
+            fclose(f32_check);
+            codec_encoder_model_path_ = f32_tok_path;
+            fprintf(stderr, "  Codec encoder will use F32 tokenizer weights: %s\n",
+                    f32_tok_path.c_str());
+        }
+    }
     encoder_loaded_ = false;
     transformer_loaded_ = false;
     decoder_loaded_ = false;
@@ -795,8 +809,8 @@ tts_result Qwen3TTS::synthesize_in_context(const std::string & text,
         // Encode reference audio to codec tokens using the Mimi encoder
         // (skipped entirely when pre-computed tokens were supplied)
         if (!codec_encoder_loaded_) {
-            // The codec encoder loads from the same tokenizer GGUF as the decoder
-            if (!codec_encoder_.load(decoder_model_path_)) {
+            // Prefers the F32 tokenizer GGUF when the model dir has one
+            if (!codec_encoder_.load(codec_encoder_model_path_)) {
                 result.error_msg = "Failed to load codec encoder: " + std::string(codec_encoder_.get_error());
                 return result;
             }

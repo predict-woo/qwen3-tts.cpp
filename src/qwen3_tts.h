@@ -182,6 +182,7 @@ private:
     std::string error_msg_;
     std::string tts_model_path_;
     std::string decoder_model_path_;
+    std::string codec_encoder_model_path_;  // F32 tokenizer GGUF when available
     tts_progress_callback_t progress_callback_;
 };
 
