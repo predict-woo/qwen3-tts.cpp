@@ -266,6 +266,10 @@ static void test_f32_exact_parity(const std::string & default_model_path) {
         tests_failed++;
         return;
     }
+    // The parity claim is about the host-F32 path; QWEN3_TTS_ENCODER_F32=0
+    // in the environment must not divert this test onto the GGML graph
+    // (which cannot run F32 weights — im2col asserts F16).
+    enc.set_use_f32(true);
 
     // Read the committed WAV so both this test and the Python reference
     // generator consume identical samples (independently computed floats
