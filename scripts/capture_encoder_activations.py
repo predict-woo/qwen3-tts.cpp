@@ -4,7 +4,9 @@
 Hooks every MimiEncoder layer plus the outer transformer/downsample/quantizer
 stages and saves each activation to reference/enc_acts/ as .npy.
 
-Usage: python scripts/capture_encoder_activations.py [audio.f32]
+Usage: python scripts/capture_encoder_activations.py <speech_tokenizer_dir> [audio.f32] [out_dir]
+       <speech_tokenizer_dir> is the model's speech_tokenizer directory,
+       e.g. .../Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer
 """
 import sys
 from pathlib import Path
@@ -12,9 +14,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-MODEL = "/home/willwade/spikes/qwen3-tts.cpp/models/Qwen3-TTS-12Hz-0.6B-Base/speech_tokenizer"
-AUDIO = sys.argv[1] if len(sys.argv) > 1 else "/tmp/will_ref.f32"
-OUT = Path("reference/enc_acts")
+if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    print(__doc__)
+    sys.exit(0 if len(sys.argv) >= 2 else 1)
+
+MODEL = sys.argv[1]
+AUDIO = sys.argv[2] if len(sys.argv) > 2 else "/tmp/will_ref.f32"
+OUT = Path(sys.argv[3]) if len(sys.argv) > 3 else Path("reference/enc_acts")
 
 
 def main():
