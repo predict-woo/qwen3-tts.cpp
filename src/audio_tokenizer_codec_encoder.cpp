@@ -392,9 +392,14 @@ static struct ggml_tensor * permute_qkv_weight_kyutai_to_block(
 }
 
 bool CodecEncoder::load(const std::string & model_path) {
-    // Runtime path toggle: QWEN3_TTS_ENCODER_F32=0 selects the GGML F16
-    // graph path (default 1 = host-side F32 on this branch)
-    if (const char * env = getenv("QWEN3_TTS_ENCODER_F32")) {
+    // Runtime path toggle: QWEN3_TTS_ENCODER_F32=1/0 overrides. Without
+    // the env var the default is chosen by the weight type after load:
+    // host-F32 with F32 weights (exact parity — the GGML graph cannot
+    // run them, conv_1d/im2col requires F16), GGML F16 graph with F16
+    // weights (the host path buys nothing there and costs ~2x).
+    const char * env = getenv("QWEN3_TTS_ENCODER_F32");
+    const bool env_set = (env != nullptr);
+    if (env_set) {
         use_f32_ = (strcmp(env, "0") != 0);
     }
     unload();
@@ -454,6 +459,11 @@ bool CodecEncoder::load(const std::string & model_path) {
         struct ggml_tensor * tensor = ggml_dup_tensor(model_.ctx, meta_tensor);
         ggml_set_name(tensor, name);
         model_.tensors[name] = tensor;
+        // Weight-type detection must look at 2D+ tensors only: 1D tensors
+        // (biases, norms, scales) are stored F32 even in F16 GGUFs.
+        if (ggml_n_dims(meta_tensor) > 1 && meta_tensor->type == GGML_TYPE_F32) {
+            weights_f32_ = true;
+        }
 
         std::string sname(name);
 
@@ -531,7 +541,12 @@ bool CodecEncoder::load(const std::string & model_path) {
     }
 
     model_.loaded = true;
-    ENC_LOG("Encoder loaded: %d tensors\n", enc_tensor_count);
+    if (!env_set) {
+        use_f32_ = weights_f32_;
+    }
+    ENC_LOG("Encoder loaded: %d tensors (%s weights, %s path)\n", enc_tensor_count,
+            weights_f32_ ? "F32" : "F16",
+            use_f32_ ? "host-F32" : "GGML");
     return true;
 }
 
@@ -546,6 +561,7 @@ void CodecEncoder::unload() {
     }
     model_.tensors.clear();
     model_.loaded = false;
+    weights_f32_ = false;
 }
 
 // ─── Encode: full forward pass ────────────────────────────────────────

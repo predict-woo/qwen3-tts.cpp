@@ -146,6 +146,9 @@ public:
                 int32_t & n_frames);
 
     void set_use_f32(bool enabled) { use_f32_ = enabled; }
+    bool use_f32() const { return use_f32_; }
+    /// true when the loaded GGUF carries F32 weights (exact-parity mode)
+    bool weights_are_f32() const { return weights_f32_; }
 
     const char * get_error() const { return error_msg_.c_str(); }
     const MimiEncoderConfig & config() const { return model_.config; }
@@ -160,6 +163,7 @@ private:
     MimiEncoderModel model_;
     std::string error_msg_;
     bool use_f32_ = true;
+    bool weights_f32_ = false;
 };
 
 } // namespace qwen3_tts
