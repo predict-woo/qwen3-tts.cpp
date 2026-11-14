@@ -904,6 +904,13 @@ tts_result Qwen3TTS::synthesize_icl_internal(const std::string & text,
         }
         transformer_loaded_ = true;
     }
+    // ICL runs read the attention-dump path too — generate_icl() clears
+    // and writes the dump exactly like generate() does.
+    if (const char * attn_dump_path = getenv("QWEN3_TTS_ATTN_DUMP")) {
+        if (*attn_dump_path) {
+            transformer_.set_attn_dump(attn_dump_path);
+        }
+    }
     transformer_.clear_kv_cache();
 
     int64_t t_generate_start = get_time_ms();
