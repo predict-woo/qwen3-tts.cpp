@@ -237,12 +237,19 @@ bool Qwen3TTS::load_models(const std::string & model_dir) {
 // Warmup context: 48 frames. 12 frames (the chunked-CUDA minimum) left
 // audible discontinuities at every chunk boundary — greedy voice-clone
 // streaming vs non-streaming over the voiced part measured 25.8 dB SNR
-// with errors starting at each boundary; 48 frames reaches ~50-60 dB
+// with errors starting at each boundary; 48 frames reaches ~50 dB on a
+// longer voice-clone text and ~68 dB on a clean plain utterance
 // (indistinguishable). The decoder transformer is causal
 // (diag_mask_inf), so windowed decode with sufficient context is
 // SOUND — but not numerically bit-exact: each window is a different
 // graph shape, so float reduction order differs from a whole-utterance
-// decode. Expect ~50+ dB SNR vs the batch decode, not identity.
+// decode. Expect ~50+ dB SNR vs the batch decode on clean speech, not
+// identity (runs that degenerate into babble measure lower).
+//
+// Cost: the 48-frame default adds roughly 35-40% wall time on CPU
+// (plain 19 s -> 26 s; 16 s greedy voice clone 76 s -> 105 s) because
+// every chunk re-decodes the warmup context. Lower
+// QWEN3_TTS_STREAM_CONTEXT_FRAMES to trade boundary quality for speed.
 namespace {
 int stream_context_frames() {
     static const int v = [] {
