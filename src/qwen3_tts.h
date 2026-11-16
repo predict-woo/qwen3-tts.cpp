@@ -171,7 +171,9 @@ public:
     /// post-hoc audio cutting — utterances are capped by max_audio_tokens
     /// (plain) / the duration prior (ICL). Windowed vocoder decode is
     /// causally sound but not numerically identical to a batch decode:
-    /// ~50+ dB SNR vs batch with a voice clone, ~25 dB plain (see
+    /// measured stream vs non-stream SNR is ~68 dB on a clean greedy
+    /// plain utterance and ~50 dB for a longer voice-clone text (runs
+    /// that degenerate into babble measure lower; see
     /// StreamDecoderDriver).
     tts_result synthesize_streaming(const std::string & text,
                                      const tts_params & params,
