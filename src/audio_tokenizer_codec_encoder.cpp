@@ -543,6 +543,13 @@ bool CodecEncoder::load(const std::string & model_path) {
     model_.loaded = true;
     if (!env_set) {
         use_f32_ = weights_f32_;
+    } else if (!use_f32_ && weights_f32_) {
+        // QWEN3_TTS_ENCODER_F32=0 cannot run F32 weights: the GGML graph's
+        // conv_1d/im2col requires F16. Ignore the override (with a warning)
+        // rather than aborting mid-encode.
+        fprintf(stderr, "warning: QWEN3_TTS_ENCODER_F32=0 ignored for F32 weights "
+                        "(GGML conv_1d requires F16); using the host-F32 path\n");
+        use_f32_ = true;
     }
     ENC_LOG("Encoder loaded: %d tensors (%s weights, %s path)\n", enc_tensor_count,
             weights_f32_ ? "F32" : "F16",
