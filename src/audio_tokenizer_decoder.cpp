@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <vector>
 
 #define QWEN3_TTS_DEC_MAX_NODES 32768
 
@@ -64,14 +65,17 @@ void AudioTokenizerDecoder::unload_model() {
 void AudioTokenizerDecoder::normalize_codebooks() {
     const float epsilon = 1e-5f;
     
+    // The weights may be in device memory, so the codebook goes through a host copy.
     auto normalize_codebook = [epsilon](struct ggml_tensor * codebook, struct ggml_tensor * usage, const char *) {
-        if (!codebook || !usage || !codebook->data || !usage->data) return;
+        if (!codebook || !usage || !codebook->buffer || !usage->buffer) return;
         
         int64_t codebook_dim = codebook->ne[0];
         int64_t codebook_size = codebook->ne[1];
         
-        ggml_fp16_t * cb_data = (ggml_fp16_t *)codebook->data;
-        float * usage_data = (float *)usage->data;
+        std::vector<ggml_fp16_t> cb_data(ggml_nelements(codebook));
+        std::vector<float> usage_data(ggml_nelements(usage));
+        ggml_backend_tensor_get(codebook, cb_data.data(), 0, ggml_nbytes(codebook));
+        ggml_backend_tensor_get(usage, usage_data.data(), 0, ggml_nbytes(usage));
         
         for (int64_t emb_idx = 0; emb_idx < codebook_size; ++emb_idx) {
             float u = usage_data[emb_idx];
@@ -84,6 +88,7 @@ void AudioTokenizerDecoder::normalize_codebooks() {
                 cb_data[mem_idx] = ggml_fp32_to_fp16(val * inv_u);
             }
         }
+        ggml_backend_tensor_set(codebook, cb_data.data(), 0, ggml_nbytes(codebook));
         
     };
     
@@ -352,16 +357,6 @@ bool AudioTokenizerDecoder::load_model(const std::string & model_path) {
     }
     
     normalize_codebooks();
-    // Codebooks are normalized in host memory; sync once to backend tensors.
-    auto upload_if_present = [](struct ggml_tensor * t) {
-        if (t && t->data) {
-            ggml_backend_tensor_set(t, t->data, 0, ggml_nbytes(t));
-        }
-    };
-    upload_if_present(model_.vq_first_codebook);
-    for (int i = 0; i < 15; ++i) {
-        upload_if_present(model_.vq_rest_codebook[i]);
-    }
     
     state_.backend = init_preferred_backend("AudioTokenizerDecoder", &error_msg_);
     if (!state_.backend) {

@@ -137,9 +137,14 @@ ggml_backend_t init_tensor_loader_backend(enum ggml_backend_dev_type preferred_b
         return backend;
     }
 
-    ggml_backend_t backend = ggml_backend_init_by_type(preferred_backend_type, nullptr);
-    if (!backend && preferred_backend_type != GGML_BACKEND_DEVICE_TYPE_CPU) {
-        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    if (preferred_backend_type == GGML_BACKEND_DEVICE_TYPE_CPU) {
+        return ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    }
+    // Same order as init_preferred_backend(), so weights land on the device that computes with them.
+    ggml_backend_t backend = nullptr;
+    for (auto type : {GGML_BACKEND_DEVICE_TYPE_GPU, GGML_BACKEND_DEVICE_TYPE_IGPU, GGML_BACKEND_DEVICE_TYPE_ACCEL, GGML_BACKEND_DEVICE_TYPE_CPU}) {
+        if (backend) break;
+        backend = ggml_backend_init_by_type(type, nullptr);
     }
     return backend;
 }
@@ -171,9 +176,10 @@ ggml_backend_t init_preferred_backend(const char * component_name, std::string *
             backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
         }
     } else {
-        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+        // A discrete GPU beats the integrated one when a machine has both.
+        backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
         if (!backend) {
-            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+            backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
         }
         if (!backend) {
             backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_ACCEL, nullptr);
