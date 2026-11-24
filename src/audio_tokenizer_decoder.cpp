@@ -506,6 +506,22 @@ struct ggml_tensor * AudioTokenizerDecoder::apply_pre_tfm_layer(struct ggml_cont
     return ggml_add(ctx, residual, ffn_out);
 }
 
+// Transposed 1D convolution (stride s, no padding, no dilation) as a matrix product and col2im.
+// x is [T, C_in], w is [K, C_out, C_in]; the result is [(T - 1) * s + K, C_out].
+// The Vulkan backend runs GGML_OP_CONV_TRANSPOSE_1D only with F32 weights and with one thread
+// per output channel, so this form is much faster there.
+static struct ggml_tensor * conv_transpose_1d(struct ggml_context * ctx, struct ggml_tensor * w,
+                                              struct ggml_tensor * x, int s) {
+    const int64_t K = w->ne[0];
+    const int64_t c_out = w->ne[1];
+    const int64_t c_in = w->ne[2];
+    struct ggml_tensor * wt = ggml_cont(ctx, ggml_transpose(ctx, ggml_reshape_2d(ctx, w, K * c_out, c_in)));
+    struct ggml_tensor * xt = ggml_cont(ctx, ggml_transpose(ctx, x));
+    // cols[k + K * o, t] = sum_i w[k, o, i] * x[t, i]
+    struct ggml_tensor * cols = ggml_mul_mat(ctx, wt, xt);
+    return ggml_col2im_1d(ctx, cols, s, (int) c_out, 0);
+}
+
 struct ggml_tensor * AudioTokenizerDecoder::apply_upsample_block(struct ggml_context * ctx,
                                                                    struct ggml_tensor * x,
                                                                    const upsample_block & block,
@@ -514,7 +530,7 @@ struct ggml_tensor * AudioTokenizerDecoder::apply_upsample_block(struct ggml_con
     int64_t channels = x->ne[1];
     
      struct ggml_tensor * x_2d = ggml_reshape_2d(ctx, x, seq_len, channels);
-     x_2d = ggml_conv_transpose_1d(ctx, block.conv_w, x_2d, 2, 0, 1);
+     x_2d = conv_transpose_1d(ctx, block.conv_w, x_2d, 2);
      
      int64_t new_seq_len = x_2d->ne[0];
      x = ggml_reshape_3d(ctx, x_2d, new_seq_len, channels, 1);
@@ -612,7 +628,7 @@ struct ggml_tensor * AudioTokenizerDecoder::apply_decoder_block(struct ggml_cont
      int kernel_size = block.conv_t_w->ne[0];
      
      struct ggml_tensor * x_2d = ggml_reshape_2d(ctx, x, seq_len, in_channels);
-     x_2d = ggml_conv_transpose_1d(ctx, block.conv_t_w, x_2d, upsample_rate, 0, 1);
+     x_2d = conv_transpose_1d(ctx, block.conv_t_w, x_2d, upsample_rate);
      
      int64_t new_seq_len = x_2d->ne[0];
      x = ggml_reshape_3d(ctx, x_2d, new_seq_len, out_channels, 1);
