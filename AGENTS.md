@@ -93,9 +93,9 @@ is dequantized on every call (measured on RK3588, Q8_0: 192.4 -> 62.5 ms per cod
 
 Backend initialization and scheduling notes:
 
-- Use `init_preferred_backend()` (`src/gguf_loader.cpp`) to select backend in order: `IGPU -> GPU -> ACCEL -> CPU`
+- Use `init_preferred_backend()` (`src/gguf_loader.cpp`) to select backend in order: `GPU -> IGPU -> ACCEL -> CPU`
 - If the selected runtime backend is not CPU, add a CPU backend as scheduler fallback (`backend_cpu`) when calling `ggml_backend_sched_new(...)`
-- Decoder follows the same backend preference; load decoder weights with `GGML_BACKEND_DEVICE_TYPE_IGPU` preference for Metal-first execution
+- Decoder follows the same backend preference; load decoder weights with `GGML_BACKEND_DEVICE_TYPE_GPU`, so they land on the device that computes with them (Metal reports this type)
 
 ### Model Architecture
 

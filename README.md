@@ -191,7 +191,7 @@ Set `QWEN3_TTS_USE_COREML=0` to disable it. Low-memory mode is opt-in via `QWEN3
 
 At runtime, each component logs its selected backend (for example, `TTSTransformer backend: MTL0` or `BLAS`).
 
-- Preferred order: `IGPU` -> `GPU` -> `ACCEL` -> `CPU`
+- Preferred order: `GPU` -> `IGPU` -> `ACCEL` -> `CPU`
 - Encoder and transformer can run on Metal/other accelerators with CPU fallback in the scheduler
 - Decoder now follows the same backend preference and will use Metal when available
 - `QWEN3_TTS_BACKEND` overrides runtime selection: `auto` (default), `cuda`, or `cpu`
