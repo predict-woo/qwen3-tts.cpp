@@ -17,6 +17,7 @@ void print_usage(const char * program) {
     fprintf(stderr, "  -v, --verbose        Print progress during generation\n");
     fprintf(stderr, "      --ref-text <text>  Transcript (enables ICL cloning)\n");
     fprintf(stderr, "      --ref-code <file>  Pre-computed codec tokens (exact Python encoder)\n");
+    fprintf(stderr, "      --stream           Stream audio chunks during generation (logs chunk timing)\n");
     fprintf(stderr, "  --temperature <val>    Sampling temperature (default: 0.9, 0=greedy)\n");
     fprintf(stderr, "  --top-k <n>            Top-k sampling (default: 50, 0=disabled)\n");
     fprintf(stderr, "  --top-p <val>          Top-p sampling (default: 1.0)\n");
