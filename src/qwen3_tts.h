@@ -139,9 +139,11 @@ public:
     // Synthesize with pre-computed speaker embedding (skips encoder)
     // embedding: speaker embedding from extract_speaker_embedding()
     // embedding_size: must match hidden_size (typically 1024)
+    // on_audio: optional streaming callback (progressive delivery)
     tts_result synthesize_with_embedding(const std::string & text,
                                           const float * embedding, int32_t embedding_size,
-                                          const tts_params & params = tts_params());
+                                          const tts_params & params = tts_params(),
+                                          const StreamingAudioCallback & on_audio = nullptr);
 
     /// Generate speech with in-context voice cloning (ICL mode).
     /// Combines speaker embedding + reference codec tokens + transcript

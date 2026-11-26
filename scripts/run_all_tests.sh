@@ -155,6 +155,27 @@ else
 fi
 log ""
 
+log "--- Test 1.5: C API streaming (voice cloning) ---"
+if [[ -x "./build/test_c_api_streaming" ]]; then
+    if [[ -f "models/qwen3-tts-0.6b-f16.gguf" || -f "models/qwen3-tts-0.6b-q8_0.gguf" ]]; then
+        output=$(timeout 900 ./build/test_c_api_streaming --model-dir models 2>&1)
+        rc=$?
+        # the measured lines, for the record
+        echo "$output" | grep -E "^Route:|stream vs batch|identical| dB$|first at" | while IFS= read -r line; do log "    $line"; done
+        if [[ $rc -eq 0 ]] && echo "$output" | grep -q "All tests passed"; then
+            pass "C API streaming test (clones stream, and match their batch twins)"
+        else
+            fail "C API streaming test (exit code: $rc)"
+            log_output_tail "$output"
+        fi
+    else
+        skip "C API streaming test (model not found)"
+    fi
+else
+    skip "C API streaming test (binary not found)"
+fi
+log ""
+
 log "============================================"
 log "SECTION 2: CLI Tests with F16 Model"
 log "============================================"

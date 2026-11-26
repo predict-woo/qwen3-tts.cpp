@@ -258,6 +258,14 @@ target_link_libraries(test_codec_encoder PRIVATE
     Threads::Threads
 )
 
+# Test executable for the C API's streaming entry points (voice cloning)
+add_executable(test_c_api_streaming
+    tests/test_c_api_streaming.cpp
+)
+target_link_libraries(test_c_api_streaming PRIVATE
+    qwen3tts_shared
+)
+
 # Install targets
 install(TARGETS text_tokenizer tts_transformer audio_tokenizer_encoder audio_tokenizer_decoder qwen3_tts qwen3tts_shared qwen3-tts-cli
     ARCHIVE DESTINATION lib
@@ -292,5 +300,9 @@ add_test(NAME transformer_test
 )
 add_test(NAME decoder_test
     COMMAND test_decoder
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_test(NAME c_api_streaming_test
+    COMMAND test_c_api_streaming --model-dir models
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
