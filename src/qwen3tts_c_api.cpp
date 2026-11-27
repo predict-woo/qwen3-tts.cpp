@@ -289,6 +289,66 @@ Qwen3TtsAudio * qwen3_tts_synthesize_with_embedding(
     return out;
 }
 
+Qwen3TtsAudio * qwen3_tts_synthesize_with_voice_file_streaming(
+        Qwen3Tts * tts, const char * text,
+        const char * reference_audio_path,
+        const Qwen3TtsParams * params,
+        qwen3_tts_stream_callback callback, void * user_data) {
+    if (!tts || !text || !reference_audio_path || !callback) return nullptr;
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    auto result = tts->engine.synthesize_with_voice(text, reference_audio_path, cpp_params,
+        [&](const float * samples, size_t n) -> bool {
+            return callback(samples, (int32_t)n, user_data) != 0;
+        });
+    if (!result.success) {
+        tts->last_error = result.error_msg;
+    }
+    auto * out = to_c_audio(result);
+    AUTORELEASE_END
+    return out;
+}
+
+Qwen3TtsAudio * qwen3_tts_synthesize_with_voice_samples_streaming(
+        Qwen3Tts * tts, const char * text,
+        const float * ref_samples, int32_t n_ref_samples,
+        const Qwen3TtsParams * params,
+        qwen3_tts_stream_callback callback, void * user_data) {
+    if (!tts || !text || !ref_samples || n_ref_samples <= 0 || !callback) return nullptr;
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    auto result = tts->engine.synthesize_with_voice(text, ref_samples, n_ref_samples, cpp_params,
+        [&](const float * samples, size_t n) -> bool {
+            return callback(samples, (int32_t)n, user_data) != 0;
+        });
+    if (!result.success) {
+        tts->last_error = result.error_msg;
+    }
+    auto * out = to_c_audio(result);
+    AUTORELEASE_END
+    return out;
+}
+
+Qwen3TtsAudio * qwen3_tts_synthesize_with_embedding_streaming(
+        Qwen3Tts * tts, const char * text,
+        const float * embedding, int32_t embedding_size,
+        const Qwen3TtsParams * params,
+        qwen3_tts_stream_callback callback, void * user_data) {
+    if (!tts || !text || !embedding || embedding_size <= 0 || !callback) return nullptr;
+    AUTORELEASE_BEGIN
+    auto cpp_params = to_cpp_params(params);
+    auto result = tts->engine.synthesize_with_embedding(text, embedding, embedding_size, cpp_params,
+        [&](const float * samples, size_t n) -> bool {
+            return callback(samples, (int32_t)n, user_data) != 0;
+        });
+    if (!result.success) {
+        tts->last_error = result.error_msg;
+    }
+    auto * out = to_c_audio(result);
+    AUTORELEASE_END
+    return out;
+}
+
 const char * qwen3_tts_get_error(const Qwen3Tts * tts) {
     if (!tts) return "";
     return tts->last_error.c_str();

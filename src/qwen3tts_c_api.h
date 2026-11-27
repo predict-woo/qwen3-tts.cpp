@@ -145,6 +145,39 @@ Qwen3TtsAudio* qwen3_tts_synthesize_in_context_streaming(
     qwen3_tts_stream_callback callback,
     void* user_data);
 
+/* Streaming voice cloning: the three clone routes above (reference WAV,
+ * reference samples, pre-computed speaker embedding), with audio delivered
+ * through the callback as it is produced. The callback contract is that of
+ * qwen3_tts_synthesize_streaming(), and the returned Qwen3TtsAudio also
+ * contains the full audio. The reference is encoded before generation
+ * starts, so the first chunk follows that and ~2 s of generated audio;
+ * with a pre-computed embedding there is nothing to encode. */
+Qwen3TtsAudio* qwen3_tts_synthesize_with_voice_file_streaming(
+    Qwen3Tts* tts,
+    const char* text,
+    const char* reference_audio_path,
+    const Qwen3TtsParams* params,
+    qwen3_tts_stream_callback callback,
+    void* user_data);
+
+Qwen3TtsAudio* qwen3_tts_synthesize_with_voice_samples_streaming(
+    Qwen3Tts* tts,
+    const char* text,
+    const float* ref_samples,
+    int32_t n_ref_samples,
+    const Qwen3TtsParams* params,
+    qwen3_tts_stream_callback callback,
+    void* user_data);
+
+Qwen3TtsAudio* qwen3_tts_synthesize_with_embedding_streaming(
+    Qwen3Tts* tts,
+    const char* text,
+    const float* embedding,
+    int32_t embedding_size,
+    const Qwen3TtsParams* params,
+    qwen3_tts_stream_callback callback,
+    void* user_data);
+
 #ifdef __cplusplus
 }
 #endif

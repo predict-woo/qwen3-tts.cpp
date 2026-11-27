@@ -443,7 +443,8 @@ bool Qwen3TTS::extract_speaker_embedding(const float * ref_samples, int32_t n_re
 
 tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
                                                 const float * embedding, int32_t embedding_size,
-                                                const tts_params & params) {
+                                                const tts_params & params,
+                                                const StreamingAudioCallback & on_audio) {
     tts_result result;
 
     if (!models_loaded_) {
@@ -456,7 +457,8 @@ tts_result Qwen3TTS::synthesize_with_embedding(const std::string & text,
         return result;
     }
 
-    return synthesize_internal(text, embedding, params, result);
+    return synthesize_internal(text, embedding, params, result,
+                               "", on_audio ? &on_audio : nullptr);
 }
 
 tts_result Qwen3TTS::synthesize_voice_design(const std::string & text,
