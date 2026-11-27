@@ -93,15 +93,44 @@ static void compute_mel_filterbank_slaney(float * filterbank, int n_mels, int n_
     }
 }
 
-static void compute_dft(const float * input, float * real, float * imag, int n) {
+// Twiddle factors for a DFT of size n: [k * n + t] is exp(-2i * pi * k * t / n).
+struct DftTwiddles {
+    int n;
+    std::vector<float> cos_t;
+    std::vector<float> sin_t;
+};
+
+// Computed once per size. Evaluating the trigonometric functions inside the
+// DFT instead means n*n of them per frame: for 400 points and a 6 s clip
+// that is ~10^8 calls, and more time than the whole network takes.
+static DftTwiddles make_dft_twiddles(int n) {
+    DftTwiddles t;
+    t.n = n;
+    t.cos_t.resize(size_t(n) * n);
+    t.sin_t.resize(size_t(n) * n);
     for (int k = 0; k < n; ++k) {
-        real[k] = 0.0f;
-        imag[k] = 0.0f;
-        for (int t = 0; t < n; ++t) {
-            float angle = -2.0f * M_PI * k * t / n;
-            real[k] += input[t] * cosf(angle);
-            imag[k] += input[t] * sinf(angle);
+        for (int i = 0; i < n; ++i) {
+            float angle = -2.0f * M_PI * k * i / n;
+            t.cos_t[size_t(k) * n + i] = cosf(angle);
+            t.sin_t[size_t(k) * n + i] = sinf(angle);
         }
+    }
+    return t;
+}
+
+static void compute_dft(const DftTwiddles & t, const float * input, float * real, float * imag) {
+    const int n = t.n;
+    for (int k = 0; k < n; ++k) {
+        const float * c = &t.cos_t[size_t(k) * n];
+        const float * s = &t.sin_t[size_t(k) * n];
+        float re = 0.0f;
+        float im = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            re += input[i] * c[i];
+            im += input[i] * s[i];
+        }
+        real[k] = re;
+        imag[k] = im;
     }
 }
 
@@ -338,6 +367,8 @@ bool AudioTokenizerEncoder::compute_mel_spectrogram(const float * samples, int32
     std::vector<float> fft_imag(cfg.n_fft);
     std::vector<float> magnitude(n_fft_bins);
     
+    const DftTwiddles twiddles = make_dft_twiddles(cfg.n_fft);
+
     for (int32_t f = 0; f < n_frames; ++f) {
         int start = f * cfg.hop_length;
         
@@ -346,7 +377,7 @@ bool AudioTokenizerEncoder::compute_mel_spectrogram(const float * samples, int32
             frame[i] = padded[start + i] * window[i];
         }
         
-        compute_dft(frame.data(), fft_real.data(), fft_imag.data(), cfg.n_fft);
+        compute_dft(twiddles, frame.data(), fft_real.data(), fft_imag.data());
         
         // Compute magnitude (not power) - matches torch.stft with return_complex=True then abs()
         // spec = torch.sqrt(torch.view_as_real(spec).pow(2).sum(-1) + 1e-9)
