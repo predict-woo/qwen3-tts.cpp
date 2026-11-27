@@ -12,6 +12,9 @@ Runs the full TTS pipeline in pure C++17, including text tokenization, speaker e
 
 - Full text-to-speech pipeline in C++17 with GGML backend
 - Voice cloning from reference audio (ECAPA-TDNN x-vector extraction)
+- In-context voice cloning from reference audio and its transcript
+- Voice design from a natural-language instruct (VoiceDesign model)
+- Streaming synthesis with audio chunks delivered during generation
 - Greedy and sampled decoding (temperature, top-k, repetition penalty)
 - GGUF model format (F16 and Q8_0 quantization)
 - Runtime backend selection with GPU/Metal preference and CPU fallback
@@ -162,6 +165,17 @@ Place both `.gguf` files in a `models/` directory.
 # Voice cloning from reference audio
 ./build/qwen3-tts-cli -m models -t "Hello! How are you?" -r reference.wav -o cloned.wav
 
+# In-context voice cloning (reference audio with its transcript)
+./build/qwen3-tts-cli -m models -t "Hello! How are you?" -r reference.wav \
+    --ref-text "Transcript of the reference audio." -o icl.wav
+
+# Voice design with an instruct (needs a VoiceDesign model)
+./build/qwen3-tts-cli -m models -t "Hello! How are you?" \
+    --instruct "a young 6 year old girl from Manchester" -o designed.wav
+
+# Streaming synthesis (the CLI logs each chunk as it is generated)
+./build/qwen3-tts-cli -m models -t "Hello, world!" --stream -o streamed.wav
+
 # Greedy decoding with max length
 ./build/qwen3-tts-cli -m models -t "Hello!" -r ref.wav -o out.wav \
     --temperature 0 --max-tokens 2048
@@ -175,6 +189,10 @@ Place both `.gguf` files in a `models/` directory.
 | `-t, --text <text>` | Text to synthesize | (required) |
 | `-o, --output <file>` | Output WAV file path | `output.wav` |
 | `-r, --reference <file>` | Reference audio for voice cloning | (none) |
+| `--ref-text <text>` | Transcript of the reference audio (enables in-context cloning) | (none) |
+| `--ref-code <file>` | Pre-computed codec tokens for the reference audio (requires `--ref-text`) | (none) |
+| `--instruct <text>` | Voice design instruct (needs a VoiceDesign model) | (none) |
+| `--stream` | Stream audio chunks during generation (the CLI logs them) | off |
 | `--temperature <val>` | Sampling temperature (0 = greedy) | 0.9 |
 | `--top-k <n>` | Top-k sampling (0 = disabled) | 50 |
 | `--top-p <val>` | Top-p sampling | 1.0 |
